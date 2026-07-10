@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DuTurbo Templates — Barra Rápida
 // @namespace    duacademy.site
-// @version      1.0.0
+// @version      1.1.0
 // @description  Botones de templates rápidos para HeroCare. Cupón, Tarjeta, Imagen, Despedidas, Encuesta.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
@@ -90,6 +90,45 @@
         }
         return false;
     }
+
+    // ════════════════════════════════════════════════════════════
+    // 🤖 IA — LECTURA DEL CHAT
+    // ════════════════════════════════════════════════════════════
+    // Colores computados de fondo de [data-testid="chat-bubble-container"]
+    // verificados contra 7 mensajes reales de HeroCare.
+    const COLOR_ASESORA = 'rgb(186, 231, 255)';
+    const COLOR_CLIENTE = 'rgb(255, 255, 255)';
+
+    function obtenerUltimoMensajeCliente() {
+        const container = document.querySelector('[data-testid="conversation-container"]');
+        if (!container) return null;
+
+        const bubbles = [...container.querySelectorAll(':scope > div[data-testid="chat-bubble"]')];
+        if (!bubbles.length) return null;
+
+        const clientMsgs = [];
+
+        for (const b of bubbles) {
+            const bc = b.querySelector('[data-testid="chat-bubble-container"]');
+            if (!bc) continue;
+
+            const color = getComputedStyle(bc).backgroundColor;
+            if (color !== COLOR_ASESORA && color !== COLOR_CLIENTE) {
+                console.warn('[DuTurbo IA] No se pudo identificar el emisor con confianza, colores esperados no coinciden');
+                return null;
+            }
+
+            if (color === COLOR_CLIENTE) clientMsgs.push(b);
+        }
+
+        if (!clientMsgs.length) return null;
+
+        const texto = clientMsgs.at(-1)?.querySelector('[data-testid="chat-bubble-paragraph"]')?.textContent;
+        return texto ?? null;
+    }
+
+    // Expuesta a window para poder invocarla manualmente desde la consola.
+    window.obtenerUltimoMensajeCliente = obtenerUltimoMensajeCliente;
 
     // ════════════════════════════════════════════════════════════
     // 🎨 CREAR BARRA DE TEMPLATES
