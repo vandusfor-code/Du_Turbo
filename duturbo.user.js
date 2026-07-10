@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.6.0
-// @description  v3.6.0: Integración con backend propio (Claude Haiku 4.5) en vez de OpenAI directo. Fix conteo de badges 10+, detección de emisor por color con fallback estructural, timeout de Modo Gestión corregido en logs.
+// @version      3.6.1
+// @description  v3.6.1: backendURL apunta al deploy real en Vercel (du-turbo-backend), ya no a localhost. v3.6.0: Integración con backend propio (Claude Haiku 4.5) en vez de OpenAI directo. Fix conteo de badges 10+, detección de emisor por color con fallback estructural, timeout de Modo Gestión corregido en logs.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -29,7 +29,7 @@
 
         // 🤖 Modo Inteligente — vía backend propio (Claude Haiku 4.5)
         // La API key vive en el servidor (variable de entorno), nunca en este archivo.
-        backendURL: 'http://localhost:3000/api/generar-respuesta',
+        backendURL: 'https://du-turbo-backend.vercel.app/api/generar-respuesta',
 
         modoIA: 'rapido',
         timeoutIA: 4000,
@@ -2047,7 +2047,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.6.0</span>
+                    <span id="dt-title">🤖 DuTurbo v3.6.1</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2652,9 +2652,9 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.6.0 cargado (backend propio + fixes)', 'success');
+        log('🚀 DuTurbo v3.6.1 cargado (backend propio + fixes)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
-        log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL} (aún no implementado)`, 'info');
+        log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
 
