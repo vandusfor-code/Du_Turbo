@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.6.1
-// @description  v3.6.1: backendURL apunta al deploy real en Vercel (du-turbo-backend), ya no a localhost. v3.6.0: Integración con backend propio (Claude Haiku 4.5) en vez de OpenAI directo. Fix conteo de badges 10+, detección de emisor por color con fallback estructural, timeout de Modo Gestión corregido en logs.
+// @version      3.6.2
+// @description  v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -52,6 +52,12 @@
         chatBubble: '[data-testid="chat-bubble"]',
         dividerNew: '.ant-divider-with-text',
         textarea: 'textarea[placeholder*="scribe"]',
+        // 🆕 v3.6.2: el <li> trae data-testid="ticket-{uuid}" (id estable real)
+        // y el nombre vive en un <span class="... name-..."> separado del
+        // countdown que tickea cada segundo (class="... countdown-...").
+        ticketIdAttr: /^ticket-(.+)$/,
+        ticketName: '[class*="name-"]',
+        handlingTime: '[data-testid="handling-time-label"]',
     };
 
     // ════════════════════════════════════════════════════════════
@@ -1147,13 +1153,13 @@
         frasesEnviadasPorChat.set(chatId, lista);
     }
 
-    function resetChatLigero(chatId) {
+    function resetChatLigero(chatId, nombre) {
         respuestasPorChat.delete(chatId);
         usosNombrePorChat.delete(chatId);
         chatsCriticos.delete(chatId);
         // 🆕 v3.4: NO borramos palabrasUsadasPorChat ni indiceSecuencialPorChat
         // Eso mantiene la memoria de no-repetir y la secuencia de frases
-        log(`🔄 Click manual en ${chatId} — contador reseteado`, 'info');
+        log(`🔄 Click manual en ${nombre || chatId} — contador reseteado`, 'info');
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1544,46 +1550,39 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         return (!isNaN(n) && n > 0) ? n : 0;
     }
 
+    // 🆕 v3.6.2: extraen datos del item por selector dedicado, NO por texto
+    // concatenado del <li> completo (ese texto incluye un countdown que
+    // tickea cada segundo — usarlo para armar el id causaba que cada chat
+    // pareciera "otro chat" en cada poll, rompiendo Modo Gestión).
+    function extraerIdTicket(item) {
+        const testId = item.getAttribute('data-testid') || '';
+        const m = testId.match(SEL.ticketIdAttr);
+        return m ? m[1] : null;
+    }
+
+    function extraerNombreCliente(item) {
+        const nameEl = item.querySelector(SEL.ticketName);
+        return nameEl ? (nameEl.textContent || '').trim() : '';
+    }
+
+    function extraerMinutosAbierto(item) {
+        const el = item.querySelector(SEL.handlingTime);
+        if (!el) return 0;
+        const m = (el.textContent || '').match(/(\d+)/);
+        return m ? parseInt(m[1], 10) : 0;
+    }
+
     function leerChats() {
         const items = document.querySelectorAll(SEL.chatItem);
         const chats = [];
 
         items.forEach((item) => {
-            const texto = (item.textContent || '').trim();
-            const sinTiempo = texto.replace(/^\d{1,2}:\d{2}\s*/, '');
+            const id = extraerIdTicket(item);
+            const nombre = extraerNombreCliente(item);
+            if (!id || !nombre) return;
 
-            // 🆕 v3.5.6: Parsing robusto — funciona con cualquier nombre
-            let nombre = '', minutosAbierto = 0;
-
-            // Intento 1: formato estándar "NombreCustomerXmin"
-            let m = sinTiempo.match(/^(.+?)Customer(\d+)\s*min/i);
-            if (m) {
-                nombre = m[1].trim();
-                minutosAbierto = parseInt(m[2], 10);
-            } else {
-                // Intento 2: buscar "Customer" y separar
-                const partes = sinTiempo.split(/Customer/i);
-                if (partes.length >= 2) {
-                    nombre = partes[0].trim();
-                    const minMatch = sinTiempo.match(/(\d+)\s*min/i);
-                    minutosAbierto = minMatch ? parseInt(minMatch[1], 10) : 0;
-                } else {
-                    // Intento 3: buscar minutos al final
-                    const minMatch = sinTiempo.match(/(\d+)\s*min/i);
-                    if (minMatch) {
-                        nombre = sinTiempo.replace(/\d+\s*min.*$/i, '').trim();
-                        minutosAbierto = parseInt(minMatch[1], 10);
-                    } else {
-                        return; // No se puede parsear
-                    }
-                }
-            }
-
-            if (!nombre) return;
-
+            const minutosAbierto = extraerMinutosAbierto(item);
             const mensajesSinLeer = leerNumeroBadge(item);
-
-            const id = nombre.toLowerCase().replace(/\s+/g, '_');
 
             chats.push({
                 id, nombre, minutosAbierto, mensajesSinLeer,
@@ -1604,25 +1603,11 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             const item = e.target.closest(SEL.chatItem);
             if (!item) return;
 
-            // 🆕 v3.5.6: Parsing robusto — funciona con cualquier nombre
-            const texto = (item.textContent || '').trim();
-            const sinTiempo = texto.replace(/^\d{1,2}:\d{2}\s*/, '');
-
-            let nombre = '';
-            let m = sinTiempo.match(/^(.+?)Customer(\d+)\s*min/i);
-            if (m) {
-                nombre = m[1].trim();
-            } else {
-                const partes = sinTiempo.split(/Customer/i);
-                if (partes.length >= 2) {
-                    nombre = partes[0].trim();
-                } else {
-                    nombre = sinTiempo.replace(/\d+\s*min.*$/i, '').trim();
-                }
-            }
-
-            if (!nombre) return;
-            const id = nombre.toLowerCase().replace(/\s+/g, '_');
+            // 🆕 v3.6.2: id estable real (data-testid="ticket-{uuid}") en vez
+            // de derivarlo del nombre + texto que incluye el countdown
+            const id = extraerIdTicket(item);
+            const nombre = extraerNombreCliente(item);
+            if (!id || !nombre) return;
 
             // 🆕 v3.2.2: Si cambiamos a otro chat → desactivar Modo Gestión del anterior
             if (chatActivoActual && chatActivoActual.id !== id) {
@@ -1630,7 +1615,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             }
 
             chatActivoActual = { id, nombre };
-            resetChatLigero(id);
+            resetChatLigero(id, nombre);
 
             // 🆕 v3.5.6: Auto-activar Modo Gestión al abrir un chat
             // SOLO si el usuario no lo desactivó manualmente
@@ -2047,7 +2032,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.6.1</span>
+                    <span id="dt-title">🤖 DuTurbo v3.6.2</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2652,7 +2637,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.6.1 cargado (backend propio + fixes)', 'success');
+        log('🚀 DuTurbo v3.6.2 cargado (fix id de chat estable)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
