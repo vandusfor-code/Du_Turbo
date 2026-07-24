@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.6.2
-// @description  v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
+// @version      3.8.0
+// @description  v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -18,10 +18,12 @@
     // ⚙️ CONFIGURACIÓN
     // ════════════════════════════════════════════════════════════
     const CONFIG = {
-        intervalo: 1500,
-        cooldownChat: 8000,
-        delayAntesDeEnviar: 500,
-        delayCambioDeChat: 700,
+        // 🆕 v3.7.1: SLA de máx. 20s por mensaje. intervalo y timeoutIA se
+        // bajaron para dejar margen real bajo ese tope (ver COOLDOWN_MODO_GESTION
+        // y cooldownChat más abajo, que son el otro factor grande de latencia).
+        intervalo: 1000,
+        cooldownChat: 5000,
+        delayAntesDeEnviar: 500, // 🆕 v3.8.0: solo lo usa el botón manual de "pegar template"
         pausarSiAgenteEscribe: true,
         debug: true,
         activoInicio: false,
@@ -32,7 +34,7 @@
         backendURL: 'https://du-turbo-backend.vercel.app/api/generar-respuesta',
 
         modoIA: 'rapido',
-        timeoutIA: 4000,
+        timeoutIA: 2500,
 
         // Personalización
         maxUsosNombrePorChat: 2,
@@ -45,12 +47,14 @@
     // ════════════════════════════════════════════════════════════
     // 🎯 SELECTORES DOM
     // ════════════════════════════════════════════════════════════
+    // 🆕 v3.8.0: conversationContainer/chatBubble/dividerNew ya no se usan —
+    // leer/enviar mensajes ahora pasa por la API interna de HeroCare (ver
+    // sección "API DIRECTA"), no por scrapear el DOM de la conversación
+    // abierta. textarea se conserva para el botón manual de "pegar template"
+    // y para el chequeo de "el agente está escribiendo".
     const SEL = {
         chatItem: '.ant-list-item',
         unreadBadge: '.ant-scroll-number-only-unit.current',
-        conversationContainer: '[data-testid="conversation-container"]',
-        chatBubble: '[data-testid="chat-bubble"]',
-        dividerNew: '.ant-divider-with-text',
         textarea: 'textarea[placeholder*="scribe"]',
         // 🆕 v3.6.2: el <li> trae data-testid="ticket-{uuid}" (id estable real)
         // y el nombre vive en un <span class="... name-..."> separado del
@@ -59,6 +63,214 @@
         ticketName: '[class*="name-"]',
         handlingTime: '[data-testid="handling-time-label"]',
     };
+
+    // ════════════════════════════════════════════════════════════
+    // 🌐 API DIRECTA DE HEROCARE (v3.8.0)
+    // Antes, para leer/responder un chat en segundo plano, el bot tenía que
+    // clickearlo (abrirlo visualmente) para poder leer el DOM y escribir en
+    // el textarea — eso era lo que "saltaba" de chat en chat e interrumpía
+    // al agente. Inspeccionando el Network tab se encontró la API interna
+    // que usa HeroCare para lo mismo, así que ahora el bot le habla
+    // directo sin abrir nada:
+    //   1. GET  /tickets/{ticketId}/room                → roomId + token de chat
+    //   2. GET  /rooms/{roomId}/history?roomName=...     → últimos mensajes
+    //   3. POST /rooms/send-message                      → enviar la respuesta
+    // Ningún token se hardcodea: el Authorization Bearer de sesión se
+    // captura en caliente interceptando el fetch()/XHR nativo que la propia
+    // app ya dispara constantemente (polling), así sigue siendo válido
+    // mientras el agente tenga la sesión iniciada normalmente.
+    // ════════════════════════════════════════════════════════════
+    const API_BASE = 'https://api-pedidosya-us.deliveryherocare.com/oneview/cs-chat-box/v1';
+
+    let authCapturado = null;
+    let identityIdCapturado = null;
+    let usernameCapturado = null;
+    const roomInfoPorTicket = new Map(); // ticketId -> {ticketId, id, agentJwt, name, entityId, gei}
+
+    function decodificarJWT(token) {
+        try {
+            const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+            const json = decodeURIComponent(
+                atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join('')
+            );
+            return JSON.parse(json);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function identityIdEfectivo() {
+        if (identityIdCapturado) return identityIdCapturado;
+        if (authCapturado) {
+            const payload = decodificarJWT(authCapturado.replace(/^Bearer\s+/i, ''));
+            if (payload && payload.sub) return payload.sub;
+        }
+        return '';
+    }
+
+    function usernameEfectivo() {
+        if (usernameCapturado) return usernameCapturado;
+        if (CONFIG.nombreAgente) return CONFIG.nombreAgente;
+        if (authCapturado) {
+            const payload = decodificarJWT(authCapturado.replace(/^Bearer\s+/i, ''));
+            if (payload && payload.name) return payload.name;
+        }
+        return 'Agente';
+    }
+
+    // Intercepta fetch() y XHR nativos para capturar el Authorization Bearer
+    // y (de paso) identityId/username la primera vez que la propia app envía
+    // un mensaje manualmente. Nunca bloquea ni altera la request real.
+    function instalarInterceptorFetch() {
+        if (window.__duTurboFetchHooked) return;
+        window.__duTurboFetchHooked = true;
+        const fetchOriginal = window.fetch;
+        window.fetch = function(input, init) {
+            try {
+                const url = typeof input === 'string' ? input : (input && input.url) || '';
+                const headersInit = (init && init.headers) || (input instanceof Request ? input.headers : null);
+                let auth = null;
+                if (headersInit instanceof Headers) {
+                    auth = headersInit.get('authorization') || headersInit.get('Authorization');
+                } else if (headersInit) {
+                    auth = headersInit['authorization'] || headersInit['Authorization'];
+                }
+                if (auth && /^Bearer /i.test(auth)) authCapturado = auth;
+
+                if (url.includes('/rooms/send-message') && init && typeof init.body === 'string') {
+                    try {
+                        const body = JSON.parse(init.body);
+                        if (body.identityId) identityIdCapturado = body.identityId;
+                        if (body.username) usernameCapturado = body.username;
+                    } catch (e) { /* no-op */ }
+                }
+            } catch (e) { /* nunca romper el fetch real por un fallo acá */ }
+            return fetchOriginal.apply(this, arguments);
+        };
+    }
+
+    function instalarInterceptorXHR() {
+        if (window.__duTurboXHRHooked) return;
+        window.__duTurboXHRHooked = true;
+        const abrirOriginal = XMLHttpRequest.prototype.open;
+        const enviarOriginal = XMLHttpRequest.prototype.send;
+        const setHeaderOriginal = XMLHttpRequest.prototype.setRequestHeader;
+
+        XMLHttpRequest.prototype.setRequestHeader = function(nombre, valor) {
+            try {
+                if (/^authorization$/i.test(nombre) && /^Bearer /i.test(valor)) authCapturado = valor;
+            } catch (e) { /* no-op */ }
+            return setHeaderOriginal.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this.__duTurboUrl = url;
+            return abrirOriginal.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function(body) {
+            try {
+                if (this.__duTurboUrl && String(this.__duTurboUrl).includes('/rooms/send-message') && typeof body === 'string') {
+                    const parsed = JSON.parse(body);
+                    if (parsed.identityId) identityIdCapturado = parsed.identityId;
+                    if (parsed.username) usernameCapturado = parsed.username;
+                }
+            } catch (e) { /* no-op */ }
+            return enviarOriginal.apply(this, arguments);
+        };
+    }
+
+    async function obtenerRoomInfo(ticketId) {
+        const cacheado = roomInfoPorTicket.get(ticketId);
+        if (cacheado) return cacheado;
+        if (!authCapturado) return null;
+        try {
+            const resp = await fetch(`${API_BASE}/tickets/${ticketId}/room`, {
+                method: 'GET',
+                headers: { 'Authorization': authCapturado, 'Accept': 'application/json' },
+                credentials: 'include'
+            });
+            if (!resp.ok) return null;
+            const data = await resp.json();
+            const info = {
+                ticketId,
+                id: data.id,
+                agentJwt: data.agentJwt,
+                name: data.name,
+                entityId: data.entityId,
+                gei: (data.helpcenter_context && data.helpcenter_context.gei) || data.entityId
+            };
+            roomInfoPorTicket.set(ticketId, info);
+            return info;
+        } catch (e) {
+            log(`⚠️ Error obteniendo room de ${ticketId}: ${e.message}`, 'error');
+            return null;
+        }
+    }
+
+    async function obtenerHistorialCrudo(room) {
+        if (!authCapturado) return null;
+        try {
+            const url = `${API_BASE}/rooms/${room.id}/history?roomName=${encodeURIComponent(room.name)}&entityId=${encodeURIComponent(room.entityId)}&geid=${encodeURIComponent(room.gei)}&department=CS`;
+            const resp = await fetch(url, {
+                method: 'GET',
+                headers: { 'Authorization': authCapturado, 'Accept': 'application/json' },
+                credentials: 'include'
+            });
+            if (!resp.ok) return null;
+            const data = await resp.json();
+            return (data && data.data) || [];
+        } catch (e) {
+            log(`⚠️ Error leyendo historial: ${e.message}`, 'error');
+            return null;
+        }
+    }
+
+    // Convierte los mensajes crudos de /history en una forma simple para el
+    // resto del script: identity_id === roomName ⇒ es del cliente; cualquier
+    // otro identity_id (email del agente, GENERIC_SYSTEM, etc.) ⇒ es del
+    // agente/sistema. Mucho más confiable que el color CSS que se usaba antes.
+    function clasificarMensajesHistorial(crudos, roomName) {
+        return (crudos || [])
+            .filter(m => m.type === 'text' && m.content)
+            .map(m => ({
+                texto: m.content,
+                esAgente: String(m.identity_id) !== String(roomName),
+                sortId: m.sort_id
+            }))
+            .sort((a, b) => a.sortId - b.sortId);
+    }
+
+    async function apiEnviarMensaje(room, texto) {
+        if (!authCapturado) {
+            log('❌ Sin token de sesión capturado todavía — no puedo enviar por API', 'error');
+            return false;
+        }
+        const body = {
+            access: '*',
+            content: texto,
+            identityId: identityIdEfectivo(),
+            message_id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            roomId: room.id,
+            token: room.agentJwt,
+            type: 'text',
+            username: usernameEfectivo()
+        };
+        try {
+            const resp = await fetch(`${API_BASE}/rooms/send-message`, {
+                method: 'POST',
+                headers: { 'Authorization': authCapturado, 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(body)
+            });
+            if (!resp.ok && (resp.status === 401 || resp.status === 403)) {
+                // el agentJwt de este room puede haber expirado — se refresca solo la próxima vez
+                roomInfoPorTicket.delete(room.ticketId);
+            }
+            return resp.ok;
+        } catch (e) {
+            log(`⚠️ Error enviando mensaje por API: ${e.message}`, 'error');
+            return false;
+        }
+    }
 
     // ════════════════════════════════════════════════════════════
     // 🚨 FILTRO DE SEGURIDAD — Cliente "NO TOCAR"
@@ -243,16 +455,10 @@
         /quedó anulado el cobro/i,                        // 🆕
     ];
 
-    function agenteYaDioSolucion() {
-        const cont = document.querySelector(SEL.conversationContainer);
-        if (!cont) return false;
-        // 🆕 v3.5.4: Usar esBurbujaDelAgente (no depender del nombre)
-        const burbujasAgente = Array.from(cont.querySelectorAll(SEL.chatBubble))
-            .filter(b => esBurbujaDelAgente(b));
-        return burbujasAgente.some(b => {
-            const txt = b.textContent || '';
-            return PATRONES_SOLUCION_DADA.some(rx => rx.test(txt));
-        });
+    // 🆕 v3.8.0: recibe el historial ya clasificado (ver clasificarMensajesHistorial)
+    // en vez de scrapear el DOM de la conversación abierta.
+    function agenteYaDioSolucion(historial) {
+        return historial.some(m => m.esAgente && PATRONES_SOLUCION_DADA.some(rx => rx.test(m.texto)));
     }
 
     // ════════════════════════════════════════════════════════════
@@ -329,52 +535,12 @@
         return PATRONES_SALUDO_PROTOCOLARIO.some(rx => rx.test(texto));
     }
 
-    // ════════════════════════════════════════════════════════════
-    // 🧑‍💼 DETECTOR DE BURBUJAS DEL AGENTE
-    // 🆕 v3.6.0: Fix selector frágil — antes solo dependía de una clase
-    // hasheada de styled-components (`bubbleContainer` + `timestampWrapper`
-    // en el primer hijo). Verificamos ahora con Claude en Chrome contra 7
-    // mensajes reales que el `background-color` computado de
-    // [data-testid="chat-bubble-container"] es un indicador confiable:
-    //   Asesora: rgb(186, 231, 255) (celeste) — Cliente: rgb(255, 255, 255) (blanco)
-    // Si el color no coincide con ninguno de los dos (p.ej. HeroCare cambia
-    // el tema visual), cae al heurístico estructural anterior como red de
-    // seguridad, en vez de fallar en silencio.
-    // ════════════════════════════════════════════════════════════
-    const COLOR_ASESORA = 'rgb(186, 231, 255)';
-    const COLOR_CLIENTE = 'rgb(255, 255, 255)';
-
-    function esBurbujaDelAgentePorEstructura(burbuja) {
-        const bubbleContainer = burbuja.querySelector('[class*="bubbleContainer"]');
-        if (!bubbleContainer) return false;
-        const primerHijo = bubbleContainer.firstElementChild;
-        if (!primerHijo) return false;
-        const claseDelPrimero = (primerHijo.className || '').toString();
-        return claseDelPrimero.includes('timestampWrapper');
-    }
-
-    function esBurbujaDelAgente(burbuja) {
-        const bc = burbuja.querySelector('[data-testid="chat-bubble-container"]');
-        if (bc) {
-            const color = getComputedStyle(bc).backgroundColor;
-            if (color === COLOR_ASESORA) return true;
-            if (color === COLOR_CLIENTE) return false;
-            // Color no reconocido — posible cambio de tema, cae al heurístico anterior
-        }
-        return esBurbujaDelAgentePorEstructura(burbuja);
-    }
-
-    function contarMensajesRealesDelAgente() {
-        const cont = document.querySelector(SEL.conversationContainer);
-        if (!cont) return 0;
-        const burbujas = Array.from(cont.querySelectorAll(SEL.chatBubble));
-
-        // Detectar burbujas del agente por estructura/color (esBurbujaDelAgente)
-        // No solo por el nombre, ya que las respuestas del bot NO contienen el nombre del agente
-        const delAgente = burbujas.filter(b => esBurbujaDelAgente(b));
-
-        // Solo cuenta las que NO son saludos protocolarios
-        return delAgente.filter(b => !esSaludoProtocolario(b.textContent || '')).length;
+    // 🆕 v3.8.0: antes esto distinguía agente/cliente por el color CSS
+    // computado de la burbuja (frágil ante cambios de tema). Ahora el
+    // historial de la API ya trae identity_id, así que clasificarMensajesHistorial()
+    // hace esta distinción de forma mucho más confiable — ver "API DIRECTA".
+    function contarMensajesRealesDelAgente(historial) {
+        return historial.filter(m => m.esAgente && !esSaludoProtocolario(m.texto)).length;
     }
 
     // ════════════════════════════════════════════════════════════
@@ -845,20 +1011,13 @@
     const chatConPreguntaDevolucion = new Map(); // chatId -> true
     const chatConDevolucionRespondida = new Set(); // 🆕 v3.5.3: chats donde la pregunta YA fue contestada
 
-    function detectarPreguntaDevolucion(chatId) {
+    // 🆕 v3.8.0: recibe el historial ya clasificado en vez de scrapear el DOM.
+    function detectarPreguntaDevolucion(chatId, historial) {
         // 🆕 v3.5.3: Si ya fue respondida en este chat, NUNCA reactivar
         if (chatConDevolucionRespondida.has(chatId)) return false;
 
-        // Buscar en las burbujas del agente si ya hizo la pregunta
-        const cont = document.querySelector(SEL.conversationContainer);
-        if (!cont) return false;
-
-        const burbujas = Array.from(cont.querySelectorAll('[data-testid="chat-bubble"]'));
-        const delAgente = burbujas.filter(b => esBurbujaDelAgente(b));
-
-        for (const b of delAgente) {
-            const txt = b.textContent || '';
-            if (REGEX_PREGUNTA_DEVOLUCION.test(txt)) {
+        for (const m of historial) {
+            if (m.esAgente && REGEX_PREGUNTA_DEVOLUCION.test(m.texto)) {
                 chatConPreguntaDevolucion.set(chatId, true);
                 return true;
             }
@@ -866,7 +1025,7 @@
         return chatConPreguntaDevolucion.get(chatId) || false;
     }
 
-    function clasificarRespuestaDevolucion(mensaje, chatId, nombreCliente) {
+    function clasificarRespuestaDevolucion(mensaje, chatId, nombreCliente, historial) {
         // 🆕 v3.5.3: No clasificar si ya fue respondida
         if (chatConDevolucionRespondida.has(chatId)) return null;
 
@@ -874,7 +1033,7 @@
         if (tieneSolucion(chatId) || estaDespedido(chatId)) return null;
 
         // Solo aplica si el agente ya hizo la pregunta de devolución
-        if (!detectarPreguntaDevolucion(chatId)) return null;
+        if (!detectarPreguntaDevolucion(chatId, historial)) return null;
 
         const msgLimpio = (mensaje || '').toLowerCase().trim();
 
@@ -903,32 +1062,36 @@
     const palabrasUsadasPorChat = new Map();
     const indiceSecuencialPorChat = new Map();
 
-    const PALABRAS_SIGNIFICATIVAS = [
-        // Verbos de gestión
-        'revisando', 'validando', 'verificando', 'gestionando',
-        'comprobando', 'analizando', 'consultando', 'recopilando',
-        'corroborando', 'procesando', 'revisar', 'validar', 'verificar',
-        'gestionar', 'comprobar', 'analizar', 'consultar', 'recopilar',
-        'avanzando', 'reuniendo', 'evaluando', 'profundizar',
-        // Empatía
-        'lamento', 'comprendo', 'entiendo', 'siento', 'disculpa', 'aprecio',
-        // Sustantivos clave
-        'paciencia', 'espera', 'momento', 'tiempo', 'detalles',
-        'información', 'caso', 'solicitud', 'gestión', 'situación',
-        'observación', 'comentario', 'revisión', 'comprobaciones',
-        'antecedentes', 'validaciones', 'verificaciones',
-        // Agradecimientos
-        'mantenerte', 'aguardar', 'agradezco', 'valoro', 'permíteme',
-        // Verbos de reconocimiento
-        'indicas', 'comentas', 'reportas', 'informas', 'señalas', 'mencionas',
-        'describes', 'compartes'
-    ];
+    // 🆕 v3.7.0: antes solo se rastreaba un puñado de palabras de una lista
+    // fija (PALABRAS_SIGNIFICATIVAS), así que cualquier otra palabra podía
+    // repetirse sin ser detectada. Ahora se rastrea CUALQUIER palabra de
+    // contenido (>=4 letras) y solo se excluyen conectores/función.
+    const PALABRAS_VACIAS = new Set([
+        'que', 'para', 'con', 'por', 'esta', 'este', 'esto', 'estos', 'estas',
+        'pero', 'como', 'cuando', 'donde', 'desde', 'hasta', 'entre', 'sobre',
+        'tras', 'sino', 'porque', 'aunque', 'mientras', 'todo', 'toda', 'todos',
+        'todas', 'otro', 'otra', 'otros', 'otras', 'mismo', 'misma', 'cada',
+        'algo', 'alguna', 'alguno', 'algunos', 'algunas', 'ninguna', 'ninguno',
+        'nada', 'nadie', 'muy', 'mas', 'menos', 'tan', 'tanto', 'poco', 'mucho',
+        'bastante', 'sido', 'ser', 'estar', 'estoy', 'estamos', 'estan', 'esta',
+        'tengo', 'tienes', 'tiene', 'tenemos', 'tienen', 'haber', 'habia',
+        'hola', 'buenas', 'buenos', 'usted', 'ustedes', 'ella', 'ellos', 'ellas',
+        'nosotros', 'aqui', 'alli', 'ahi', 'ahora', 'luego', 'despues', 'antes',
+        'permite', 'permiteme', 'dame', 'favor', 'para', 'quiero', 'puedo',
+        'podemos', 'vamos', 'gracias'
+    ]);
+
+    function normalizarPalabra(p) {
+        return (p || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    }
 
     function extraerPalabrasClave(texto) {
         const palabras = (texto || '').toLowerCase()
             .replace(/[.,!?¿¡;:()"'\n]/g, ' ')
-            .split(/\s+/);
-        return palabras.filter(p => PALABRAS_SIGNIFICATIVAS.includes(p));
+            .split(/\s+/)
+            .filter(Boolean)
+            .map(normalizarPalabra);
+        return palabras.filter(p => p.length >= 4 && !PALABRAS_VACIAS.has(p));
     }
 
     function registrarPalabrasUsadas(chatId, texto) {
@@ -939,22 +1102,26 @@
 
     function fueUsadaEnChat(chatId, palabra) {
         const set = palabrasUsadasPorChat.get(chatId) || new Set();
-        return set.has(palabra.toLowerCase());
+        return set.has(normalizarPalabra(palabra));
     }
 
+    // 🆕 v3.7.0: chequeo único de "esta frase repite algo ya enviado en este chat"
+    function fraseTieneRepeticion(chatId, texto) {
+        return extraerPalabrasClave(texto).some(p => fueUsadaEnChat(chatId, p));
+    }
+
+    // 🆕 v3.7.0: regla de oro real — si no hay opción libre de repetición,
+    // devuelve null en vez de forzar una repetición con elegirAleatorio(lista)
     function elegirVerboSinRepetir(chatId, forma = 'gerundio') {
         const lista = forma === 'gerundio' ? VERBOS_GESTION : VERBOS_INFINITIVO;
         const noUsados = lista.filter(v => !fueUsadaEnChat(chatId, v));
-        if (noUsados.length === 0) return elegirAleatorio(lista);
+        if (noUsados.length === 0) return null;
         return elegirAleatorio(noUsados);
     }
 
     function elegirAgradecimientoSinRepetir(chatId) {
-        const noUsados = AGRADECIMIENTOS.filter(a => {
-            const palabras = extraerPalabrasClave(a);
-            return !palabras.some(p => fueUsadaEnChat(chatId, p));
-        });
-        if (noUsados.length === 0) return elegirAleatorio(AGRADECIMIENTOS);
+        const noUsados = AGRADECIMIENTOS.filter(a => !fraseTieneRepeticion(chatId, a));
+        if (noUsados.length === 0) return null;
         return elegirAleatorio(noUsados);
     }
 
@@ -963,14 +1130,14 @@
             const rx = new RegExp(`\\b${verbo}\\b`, 'i');
             if (rx.test(frase)) {
                 const nuevoVerbo = elegirVerboSinRepetir(chatId, 'gerundio');
-                return frase.replace(rx, nuevoVerbo);
+                return nuevoVerbo ? frase.replace(rx, nuevoVerbo) : frase;
             }
         }
         for (const verbo of VERBOS_INFINITIVO) {
             const rx = new RegExp(`\\b${verbo}\\b`, 'i');
             if (rx.test(frase)) {
                 const nuevoVerbo = elegirVerboSinRepetir(chatId, 'infinitivo');
-                return frase.replace(rx, nuevoVerbo);
+                return nuevoVerbo ? frase.replace(rx, nuevoVerbo) : frase;
             }
         }
         return frase;
@@ -988,17 +1155,17 @@
         for (const rx of patrones) {
             if (rx.test(frase)) {
                 const nuevo = elegirAgradecimientoSinRepetir(chatId);
-                return frase.replace(rx, nuevo);
+                return nuevo ? frase.replace(rx, nuevo) : frase;
             }
         }
         return frase;
     }
 
     // 🆕 v3.4: Generador inteligente — corazón del modo Rápido Pro
-    function generarFraseInteligente(mensaje, chatId, nombreCliente) {
+    function generarFraseInteligente(mensaje, chatId, nombreCliente, historial) {
         // 🆕 v3.5.5: Leer SOLO la última burbuja para verificar confirmaciones
         // (el 'mensaje' concatena las últimas 3, lo cual hace fallar el regex)
-        const ultimaBurbuja = nombreCliente ? leerSoloUltimaBurbujaCliente(nombreCliente) : mensaje;
+        const ultimaBurbuja = nombreCliente ? leerSoloUltimaBurbujaCliente(historial, nombreCliente) : mensaje;
 
         const tema = detectarTemaCliente(mensaje);
         const esConfirmacion = esConfirmacionCorta(ultimaBurbuja);
@@ -1012,44 +1179,36 @@
             let frase = null;
             for (let i = 0; i < FRASES_CONTINUACION_SIMPLE.length; i++) {
                 const candidata = FRASES_CONTINUACION_SIMPLE[(idx + i) % FRASES_CONTINUACION_SIMPLE.length];
-                const palabras = extraerPalabrasClave(candidata);
-                if (!palabras.some(p => fueUsadaEnChat(chatId, p))) {
+                if (!fraseTieneRepeticion(chatId, candidata)) {
                     frase = candidata;
                     indiceContinuacionPorChat.set(chatId, idx + i + 1);
                     break;
                 }
             }
-            if (!frase) {
-                frase = FRASES_CONTINUACION_SIMPLE[idx % FRASES_CONTINUACION_SIMPLE.length];
-                indiceContinuacionPorChat.set(chatId, idx + 1);
-            }
+            // 🆕 v3.7.0: regla de oro real — si TODAS repiten algo, no forzamos
+            // el envío; el llamador (generarRespuesta) decide cómo rescatar esto.
+            if (!frase) return null;
             registrarPalabrasUsadas(chatId, frase);
             return frase;
         }
 
-        // 1. Reconocimiento contextual si hay info nueva
+        // 1. Reconocimiento contextual si hay info nueva (opcional: si no hay
+        // ninguno libre de repetición, seguimos sin reconocimiento en vez de repetir)
         let reconocimiento = '';
         if (tema) {
-            const noUsadas = tema.frases.filter(f => {
-                const palabras = extraerPalabrasClave(f);
-                return !palabras.some(p => fueUsadaEnChat(chatId, p));
-            });
-            reconocimiento = noUsadas.length > 0
-                ? elegirAleatorio(noUsadas)
-                : elegirAleatorio(tema.frases);
+            const noUsadas = tema.frases.filter(f => !fraseTieneRepeticion(chatId, f));
+            if (noUsadas.length > 0) reconocimiento = elegirAleatorio(noUsadas);
         }
 
-        // 2. Frase secuencial de espera — buscar una SIN palabras repetidas
+        // 2. Frase secuencial de espera — recorrer TODO el banco (no solo 5)
+        // buscando una sin palabras repetidas
         let indice = indiceSecuencialPorChat.get(chatId) || 0;
         let fraseEspera = null;
         const totalFrases = FRASES_SECUENCIALES.length;
 
-        for (let intento = 0; intento < Math.min(5, totalFrases); intento++) {
+        for (let intento = 0; intento < totalFrases; intento++) {
             const candidata = FRASES_SECUENCIALES[(indice + intento) % totalFrases];
-            const palabrasCandidatas = extraerPalabrasClave(candidata);
-            const tieneOverlap = palabrasCandidatas.some(p => fueUsadaEnChat(chatId, p));
-
-            if (!tieneOverlap) {
+            if (!fraseTieneRepeticion(chatId, candidata)) {
                 fraseEspera = candidata;
                 indiceSecuencialPorChat.set(chatId, indice + intento + 1);
                 break;
@@ -1057,8 +1216,12 @@
         }
 
         if (!fraseEspera) {
-            fraseEspera = FRASES_SECUENCIALES[indice % totalFrases];
-            indiceSecuencialPorChat.set(chatId, indice + 1);
+            // 🆕 v3.7.0: se agotó el banco entero sin encontrar una frase libre
+            // de repetición. Si al menos el reconocimiento es fresco, se envía
+            // solo (mejor que repetir); si no hay nada fresco, escalar (null).
+            if (!reconocimiento) return null;
+            registrarPalabrasUsadas(chatId, reconocimiento);
+            return reconocimiento;
         }
 
         // 3. Rotar verbos (regla de oro)
@@ -1077,9 +1240,12 @@
             fraseFinal = fraseEspera;
         }
 
-        // 6. Registrar para la regla de oro
-        registrarPalabrasUsadas(chatId, fraseFinal);
+        // 6. Red de seguridad: si pese a todo lo anterior fraseFinal quedó
+        // repitiendo algo (p. ej. rotarVerbos no encontró verbo libre y el
+        // verbo original ya estaba usado), no la mandamos — escalar.
+        if (fraseTieneRepeticion(chatId, fraseFinal)) return null;
 
+        registrarPalabrasUsadas(chatId, fraseFinal);
         return fraseFinal;
     }
 
@@ -1088,6 +1254,7 @@
     // ════════════════════════════════════════════════════════════
     let activo = CONFIG.activoInicio;
     let procesando = false;
+    let cicloEnCurso = false; // 🆕 v3.7.1: lock de todo el drain de ciclo() (ver más abajo)
     let logs = [];
 
     const ultimaRespuestaChat = new Map();
@@ -1100,11 +1267,11 @@
     const imagenesPorChat = new Map();    // 🆕 v3.2.1: rastrea cuántas imágenes envió el cliente
     const chatsEnModoGestion = new Map(); // 🆕 v3.2.2: chats donde el bot ayuda activamente { chatId: timestamp }
     const chatsGestionDesactivadaManual = new Set(); // 🆕 v3.5.6: chats donde el usuario desactivó manualmente
-    const ultimoMensajeClientePorChat = new Map(); // 🆕 v3.4.1: último mensaje del cliente visto en chat con Modo Gestión
+    const ultimoSortIdProcesado = new Map(); // 🆕 v3.8.0: último sort_id (API) ya respondido/visto por chat (antes: texto de la última burbuja)
     const chatsBloqueados = new Set(); // 🆕 v3.4.2: chats que están siendo procesados ahora mismo (lock estricto)
     const EXPIRACION_DESPEDIDA = 15 * 60 * 1000;
     const TIMEOUT_MODO_GESTION = 60 * 60 * 1000;  // 🆕 v3.5.6: 60 min (antes 5 min)
-    const COOLDOWN_MODO_GESTION = 10000;          // v3.3.2: 10s entre respuestas en modo gestión (más responsivo)
+    const COOLDOWN_MODO_GESTION = 6000;           // 🆕 v3.7.1: 6s (antes 10s) — deja margen real bajo el SLA de 20s
 
     // 🆕 v3.5.6: Timer por chat + sonido de alerta
     const tiempoInicioPorChat = new Map();
@@ -1120,7 +1287,6 @@
     const REGEX_IMAGEN = /https?:\/\/helpcenter-us\.usehurrier\.com\/files-api\/files\//i;
 
     let chatActivoActual = null;
-    let botCambiandoChat = false;
 
     // ════════════════════════════════════════════════════════════
     // 🛠 UTILS
@@ -1139,10 +1305,13 @@
         return arr[Math.floor(Math.random() * arr.length)];
     }
 
+    // 🆕 v3.7.0: chequea también contra palabrasUsadasPorChat (no solo el
+    // texto exacto ya enviado) y devuelve null si no hay ninguna opción
+    // libre de repetición, en vez de forzar una repetida.
     function elegirSinRepetir(arr, chatId) {
         const recientes = frasesEnviadasPorChat.get(chatId) || [];
-        const disponibles = arr.filter(f => !recientes.includes(f));
-        if (disponibles.length === 0) return elegirAleatorio(arr);
+        const disponibles = arr.filter(f => !recientes.includes(f) && !fraseTieneRepeticion(chatId, f));
+        if (disponibles.length === 0) return null;
         return elegirAleatorio(disponibles);
     }
 
@@ -1240,7 +1409,7 @@
     function desactivarModoGestion(chatId, motivo = 'manual') {
         if (!chatsEnModoGestion.has(chatId)) return;
         chatsEnModoGestion.delete(chatId);
-        // 🆕 v3.5.6: NO borrar ultimoMensajeClientePorChat
+        // 🆕 v3.5.6: NO borrar ultimoSortIdProcesado
         // para que al volver al chat, el bot recuerde qué ya respondió
         log(`🛑 Modo Gestión desactivado (${motivo}): ${chatId}`, 'warn');
     }
@@ -1276,10 +1445,10 @@
     // ════════════════════════════════════════════════════════════
     // 🧠 DECIDIR ETAPA (mejorado v3.2 con saludos protocolarios)
     // ════════════════════════════════════════════════════════════
-    function obtenerEtapa(chatId) {
+    function obtenerEtapa(chatId, historial) {
         const nBot = respuestasPorChat.get(chatId) || 0;
         // Solo contamos mensajes REALES del agente (no protocolarios)
-        const nAgenteReal = contarMensajesRealesDelAgente();
+        const nAgenteReal = contarMensajesRealesDelAgente(historial);
 
         // Si el agente ya escribió mensajes REALES → saltar a etapa 2
         if (nAgenteReal > 0 && nBot === 0) {
@@ -1326,21 +1495,26 @@
     // ════════════════════════════════════════════════════════════
     // 🚀 GENERAR RESPUESTA — MODO RÁPIDO
     // ════════════════════════════════════════════════════════════
-    function generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente) {
+    function generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente, historial) {
         let frase;
         // 🆕 v3.4: Usar generador inteligente para etapas 2+ (gestión en curso)
         // Etapa 1 mantiene apertura empática + espera (chat virgen)
         if (etapa === 1) {
             const empatia = elegirSinRepetir(FRASES.apertura_empatia, chatId);
             const espera = elegirSinRepetir(FRASES.apertura_espera, chatId);
+            // 🆕 v3.7.0: si se agotaron las frases de apertura sin repetir,
+            // no forzamos el envío — el llamador decide cómo rescatar esto.
+            if (!empatia || !espera) return null;
             frase = `${empatia} ${espera}`;
             registrarFraseEnviada(chatId, empatia);
             registrarFraseEnviada(chatId, espera);
             registrarPalabrasUsadas(chatId, frase);
         } else {
             // 🆕 v3.4: Generador inteligente con reconocimiento contextual
-            frase = generarFraseInteligente(mensaje, chatId, nombreCliente);
-            registrarFraseEnviada(chatId, frase);
+            frase = generarFraseInteligente(mensaje, chatId, nombreCliente, historial);
+            // 🆕 v3.8.0: fix — si generarFraseInteligente devolvió null (regla
+            // de oro agotada), no había que registrar "null" como frase enviada.
+            if (frase) registrarFraseEnviada(chatId, frase);
         }
         return frase;
     }
@@ -1418,6 +1592,11 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     // ════════════════════════════════════════════════════════════
     async function generarRespuestaIA(mensaje, etapa, chatId) {
         const recientes = frasesEnviadasPorChat.get(chatId) || [];
+        // 🆕 v3.7.0: además de las últimas 5 frases, mandamos TODAS las
+        // palabras significativas ya usadas en el chat, para que el backend
+        // le pida al modelo que las evite (antes solo veía las últimas 5
+        // frases, así que en chats largos podía repetir palabras viejas).
+        const palabrasUsadas = Array.from(palabrasUsadasPorChat.get(chatId) || []);
 
         try {
             const ctrl = new AbortController();
@@ -1430,7 +1609,8 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 body: JSON.stringify({
                     mensaje,
                     etapa,
-                    frasesEnviadas: recientes
+                    frasesEnviadas: recientes,
+                    palabrasUsadas
                 })
             });
 
@@ -1456,6 +1636,15 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 return null;
             }
 
+            // 🆕 v3.7.0: regla de oro — verificación dura del lado del cliente.
+            // El prompt le pide a la IA que no repita, pero es una instrucción
+            // blanda; si igual repite una palabra ya usada en este chat, se
+            // descarta acá (el llamador decide cómo rescatar esto).
+            if (fraseTieneRepeticion(chatId, texto)) {
+                log('🔁 Respuesta IA repite palabra ya usada en el chat — descartada', 'warn');
+                return null;
+            }
+
             registrarFraseEnviada(chatId, texto);
             return texto;
         } catch (err) {
@@ -1468,7 +1657,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     // 🎯 GENERAR RESPUESTA (dispatcher)
     // PRIORIDAD: imagen primera vez > saludo espejeado > generación normal
     // ════════════════════════════════════════════════════════════
-    async function generarRespuesta(mensaje, etapa, chatId, nombreCliente) {
+    async function generarRespuesta(mensaje, etapa, chatId, nombreCliente, historial) {
         // 🖼️ PRIORIDAD 1: ¿Mensaje contiene imagen?
         if (mensajeTieneImagen(mensaje)) {
             // 🆕 v3.4.2: VERIFICAR si ya enviamos la frase de imagen en este chat
@@ -1493,7 +1682,19 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                     "Recibí la foto. Sigo revisando tu caso.",
                     "Imagen recibida. Permíteme continuar con la revisión."
                 ];
-                const fraseImg = frasesImgExtra[imagenesPorChat.get(chatId) % frasesImgExtra.length];
+                // 🆕 v3.7.0: si el índice cíclico cae en una frase que ya
+                // repite algo (chat con muchas imágenes), buscar la primera
+                // libre; si ninguna lo está, escalar en vez de repetir.
+                const inicio = imagenesPorChat.get(chatId) % frasesImgExtra.length;
+                let fraseImg = null;
+                for (let i = 0; i < frasesImgExtra.length; i++) {
+                    const candidata = frasesImgExtra[(inicio + i) % frasesImgExtra.length];
+                    if (!fraseTieneRepeticion(chatId, candidata)) { fraseImg = candidata; break; }
+                }
+                if (!fraseImg) {
+                    log('🚨 Sin frase de imagen libre de repetición — escalar', 'warn');
+                    return null;
+                }
                 registrarFraseEnviada(chatId, fraseImg);
                 registrarPalabrasUsadas(chatId, fraseImg);
                 return fraseImg;
@@ -1507,13 +1708,14 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             if (saludo) {
                 log(`👋 Saludo detectado, devolviendo espejeado`, 'info');
                 registrarFraseEnviada(chatId, saludo);
+                registrarPalabrasUsadas(chatId, saludo);  // 🆕 v3.7.0: antes no se registraba
                 return saludo;
             }
         }
 
         // 💳 PRIORIDAD 3: ¿El agente preguntó cómo quiere la devolución?
         // Si sí, clasificar la respuesta del cliente (elige método o no)
-        const respuestaDevolucion = clasificarRespuestaDevolucion(mensaje, chatId, nombreCliente);
+        const respuestaDevolucion = clasificarRespuestaDevolucion(mensaje, chatId, nombreCliente, historial);
         if (respuestaDevolucion) {
             log(`💳 Respuesta a pregunta de devolución detectada`, 'info');
             registrarFraseEnviada(chatId, respuestaDevolucion);
@@ -1521,13 +1723,31 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             return respuestaDevolucion;
         }
 
+        // 🆕 v3.7.0: dispatcher con rescate cruzado. Rápido e Inteligente ahora
+        // devuelven null cuando no encuentran una frase libre de repetición
+        // (regla de oro). Si el modo preferido no encuentra nada, se prueba
+        // el otro modo como rescate antes de escalar de verdad.
         let frase;
         if (CONFIG.modoIA === 'inteligente') {
             frase = await generarRespuestaIA(mensaje, etapa, chatId);
             if (frase === '{ESCALAR}') return null;
-            if (!frase) frase = generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente);
+            if (!frase) {
+                log('🔁 IA sin frase válida — pruebo Modo Rápido como rescate', 'warn');
+                frase = generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente, historial);
+            }
         } else {
-            frase = generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente);
+            frase = generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente, historial);
+            if (!frase) {
+                log('🔁 Modo Rápido agotó frases sin repetir — pruebo IA como rescate', 'warn');
+                const rescate = await generarRespuestaIA(mensaje, etapa, chatId);
+                if (rescate === '{ESCALAR}') return null;
+                frase = rescate;
+            }
+        }
+
+        if (!frase) {
+            log('🚨 Sin frase libre de repetición (regla de oro) — escalar', 'warn');
+            return null;
         }
 
         frase = personalizarFrase(frase, nombreCliente, chatId);
@@ -1599,7 +1819,8 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     // ════════════════════════════════════════════════════════════
     function inicializarTrackingClicks() {
         document.addEventListener('click', (e) => {
-            if (botCambiandoChat) return;
+            // 🆕 v3.8.0: el bot ya no clickea chats (procesa todo por API),
+            // así que este listener ya no necesita distinguir sus propios clicks.
             const item = e.target.closest(SEL.chatItem);
             if (!item) return;
 
@@ -1621,14 +1842,18 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // SOLO si el usuario no lo desactivó manualmente
             if (!chatsGestionDesactivadaManual.has(id)) {
                 activarModoGestion(id, nombre);
-                // 🆕 v3.5.6: Capturar último mensaje del cliente como "ya visto"
-                // para NO re-responder un mensaje viejo al regresar al chat
-                setTimeout(() => {
-                    const ultimaBurbuja = leerSoloUltimaBurbujaCliente(nombre);
-                    if (ultimaBurbuja) {
-                        ultimoMensajeClientePorChat.set(id, ultimaBurbuja);
-                    }
-                }, 800);
+                // 🆕 v3.8.0: Capturar el sort_id del último mensaje (vía API,
+                // ya no hace falta esperar a que renderice el DOM) como "ya
+                // visto" para NO re-responder algo viejo al abrir el chat.
+                (async () => {
+                    const room = await obtenerRoomInfo(id);
+                    if (!room) return;
+                    const crudos = await obtenerHistorialCrudo(room);
+                    if (!crudos) return;
+                    const historial = clasificarMensajesHistorial(crudos, room.name);
+                    const ultimo = historial[historial.length - 1];
+                    if (ultimo) ultimoSortIdProcesado.set(id, ultimo.sortId);
+                })();
             }
 
             log(`👤 Chat activo: ${nombre}${chatsGestionDesactivadaManual.has(id) ? ' (manual OFF)' : ' (ayuda activada)'}`, 'info');
@@ -1645,68 +1870,33 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
 
     // ════════════════════════════════════════════════════════════
     // 📩 LEER MENSAJES NUEVOS DEL CLIENTE
+    // 🆕 v3.8.0: ambas reciben el historial ya clasificado (ver
+    // clasificarMensajesHistorial) en vez de scrapear la conversación
+    // abierta — así funcionan igual esté el chat abierto o no.
     // ════════════════════════════════════════════════════════════
-    function leerUltimoMensajeCliente(nombreCliente) {
-        const cont = document.querySelector(SEL.conversationContainer);
-        if (!cont) return '';
-
-        const hijos = Array.from(cont.children);
-
-        let idxNew = -1;
-        hijos.forEach((h, i) => {
-            if (h.classList.contains('ant-divider') && /new/i.test(h.textContent || '')) {
-                idxNew = i;
-            }
-        });
-
-        let burbujas;
-        if (idxNew >= 0) {
-            burbujas = hijos.slice(idxNew + 1)
-                .filter(h => h.getAttribute('data-testid') === 'chat-bubble');
-        } else {
-            burbujas = hijos.filter(h => h.getAttribute('data-testid') === 'chat-bubble');
-        }
-
-        if (burbujas.length === 0) return '';
-
-        // 🆕 v3.4.5: Fix definitivo — usar esBurbujaDelAgente
-        const delCliente = burbujas.filter(b => {
-            if (esBurbujaDelAgente(b)) return false;
-            const txt = b.textContent || '';
-            if (/\bsystem\b/i.test(txt)) return false;
-            // 🆕 v3.2.1: Las imágenes de HeroCare SÍ pasan
-            const textoLimpio = limpiarTextoBurbuja(txt, nombreCliente);
+    function leerUltimoMensajeCliente(historial, nombreCliente) {
+        // 🆕 v3.2.1: un link suelto que NO sea una imagen de HeroCare se
+        // ignora como "mensaje" (evita respuestas confusas a un link random)
+        const delCliente = historial.filter(m => !m.esAgente).filter(m => {
+            const textoLimpio = limpiarTextoBurbuja(m.texto, nombreCliente);
             if (/^https?:\/\/\S+$/i.test(textoLimpio) && !REGEX_IMAGEN.test(textoLimpio)) return false;
             return true;
         });
-
         if (delCliente.length === 0) return '';
 
         const ultimas = delCliente.slice(-3);
         const textos = ultimas
-            .map(b => limpiarTextoBurbuja(b.textContent || '', nombreCliente))
+            .map(m => limpiarTextoBurbuja(m.texto, nombreCliente))
             .filter(t => t.length > 0);
 
         return textos.join('. ');
     }
 
     // 🆕 v3.4.4: Lee SOLO la última burbuja del cliente (para detección estable de mensaje nuevo)
-    // 🆕 v3.4.5: usa esBurbujaDelAgente (definido arriba) para identificar correctamente al cliente
-    function leerSoloUltimaBurbujaCliente(nombreCliente) {
-        const cont = document.querySelector(SEL.conversationContainer);
-        if (!cont) return '';
-
-        const todasBurbujas = Array.from(cont.querySelectorAll('[data-testid="chat-bubble"]'));
-        if (todasBurbujas.length === 0) return '';
-
-        // 🆕 v3.4.5: Filtrar usando esBurbujaDelAgente (fix definitivo)
-        const delCliente = todasBurbujas.filter(b => !esBurbujaDelAgente(b));
-
+    function leerSoloUltimaBurbujaCliente(historial, nombreCliente) {
+        const delCliente = historial.filter(m => !m.esAgente);
         if (delCliente.length === 0) return '';
-
-        // Devolver SOLO el texto de la última burbuja del cliente
-        const ultima = delCliente[delCliente.length - 1];
-        return limpiarTextoBurbuja(ultima.textContent || '', nombreCliente).trim();
+        return limpiarTextoBurbuja(delCliente[delCliente.length - 1].texto, nombreCliente).trim();
     }
 
     function limpiarTextoBurbuja(texto, nombreCliente) {
@@ -1720,13 +1910,9 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     // ════════════════════════════════════════════════════════════
     // 🚫 ¿AGENTE YA SE DESPIDIÓ?
     // ════════════════════════════════════════════════════════════
-    function agenteYaSeDespidio() {
-        const cont = document.querySelector(SEL.conversationContainer);
-        if (!cont) return false;
-        // 🆕 v3.5.4: Usar esBurbujaDelAgente (no depender del nombre)
-        const burbujasAgente = Array.from(cont.querySelectorAll(SEL.chatBubble))
-            .filter(b => esBurbujaDelAgente(b));
-        return burbujasAgente.some(b => esDespedida(b.textContent || ''));
+    // 🆕 v3.8.0: recibe el historial ya clasificado en vez de scrapear el DOM.
+    function agenteYaSeDespidio(historial) {
+        return historial.some(m => m.esAgente && esDespedida(m.texto));
     }
 
     function marcarDespedido(chatId) {
@@ -1760,7 +1946,10 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     }
 
     // ════════════════════════════════════════════════════════════
-    // ✉️ ENVIAR MENSAJE A HEROCARE
+    // ✉️ ENVIAR MENSAJE A HEROCARE — SOLO para el botón manual "pegar
+    // template" (dt-tpl-btn), que escribe en el chat que el agente ya
+    // tiene abierto en pantalla. El procesamiento automático en segundo
+    // plano usa apiEnviarMensaje() (ver "API DIRECTA"), no esta función.
     // ════════════════════════════════════════════════════════════
     async function enviarMensaje(texto) {
         const ta = document.querySelector(SEL.textarea);
@@ -1793,97 +1982,99 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
 
     // ════════════════════════════════════════════════════════════
     // ⚙️ PROCESAR UN CHAT
+    // 🆕 v3.8.0: ya no clickea el chat ni lee/escribe el DOM — todo pasa
+    // por la API directa de HeroCare (obtenerRoomInfo/obtenerHistorialCrudo/
+    // apiEnviarMensaje), así el agente nunca ve el chat "saltar" mientras
+    // el bot responde en segundo plano.
     // ════════════════════════════════════════════════════════════
-    async function procesarChat(chat, chatPrevio) {
-        if (procesando) return;
-        // 🆕 v3.4.2: Lock estricto por chat individual
+    async function procesarChat(chat) {
         if (chatsBloqueados.has(chat.id)) return;
         chatsBloqueados.add(chat.id);
         procesando = true;
-        botCambiandoChat = true;
 
         try {
-            log(`🔄 ${chat.nombre} tiene ${chat.mensajesSinLeer} mensaje(s) nuevo(s)`, 'info');
-            chat.elemento.click();
-            await sleep(CONFIG.delayCambioDeChat);
+            const room = await obtenerRoomInfo(chat.id);
+            if (!room) {
+                log(`❌ ${chat.nombre}: no pude obtener datos del room (API)`, 'error');
+                ultimaRespuestaChat.set(chat.id, Date.now());
+                return;
+            }
+
+            const crudos = await obtenerHistorialCrudo(room);
+            if (!crudos) {
+                log(`❌ ${chat.nombre}: no pude leer el historial (API)`, 'error');
+                ultimaRespuestaChat.set(chat.id, Date.now());
+                return;
+            }
+
+            const historial = clasificarMensajesHistorial(crudos, room.name);
+            const ultimo = historial[historial.length - 1];
+
+            // Nada pendiente: badge desactualizado, o el agente ya respondió
+            // manualmente desde la UI (esto también cuenta como "esAgente").
+            if (!ultimo || ultimo.esAgente) return;
+
+            // Ya procesamos este mismo mensaje (protege contra reintentos
+            // mientras el envío anterior todavía no se refleja en el historial).
+            const sortIdVisto = ultimoSortIdProcesado.get(chat.id);
+            if (sortIdVisto != null && ultimo.sortId <= sortIdVisto) return;
+
+            log(`🔄 ${chat.nombre}: mensaje nuevo del cliente`, 'info');
 
             // CHECK 1: ¿Ya se despidió?
-            if (agenteYaSeDespidio()) {
+            if (agenteYaSeDespidio(historial)) {
                 marcarDespedido(chat.id);
                 desactivarModoGestion(chat.id, 'agente se despidió');  // 🆕 v3.2.2
                 log(`🚫 ${chat.nombre}: ya despedido`, 'warn');
-                await volverAChat(chatPrevio, chat);
+                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
 
             // CHECK 2: ¿Ya hay solución entregada?
-            if (agenteYaDioSolucion()) {
+            if (agenteYaDioSolucion(historial)) {
                 marcarConSolucion(chat.id);
                 desactivarModoGestion(chat.id, 'solución entregada');  // 🆕 v3.2.2
                 log(`💰 ${chat.nombre}: ya hay solución — no respondo`, 'warn');
-                await volverAChat(chatPrevio, chat);
+                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
 
             // Leer mensaje
-            const mensaje = leerUltimoMensajeCliente(chat.nombre);
+            const mensaje = leerUltimoMensajeCliente(historial, chat.nombre);
             if (!mensaje) {
                 log(`⚠️ No leí mensaje en ${chat.nombre}`, 'warn');
-                await volverAChat(chatPrevio, chat);
+                ultimaRespuestaChat.set(chat.id, Date.now());
                 return;
             }
             log(`📩 Cliente: "${mensaje.slice(0, 60)}..."`, 'info');
 
-            // 🆕 v3.4.3: Marcar mensaje como "siendo procesado" INMEDIATAMENTE
-            // Si otro ciclo llega aquí con el mismo mensaje, sabrá que ya se está respondiendo
-            // 🆕 v3.4.4: Usar leerSoloUltimaBurbujaCliente (estable, no las 3 últimas)
-            if (estaEnModoGestion(chat.id)) {
-                const ultimaBurbuja = leerSoloUltimaBurbujaCliente(chat.nombre);
-                if (ultimaBurbuja) {
-                    ultimoMensajeClientePorChat.set(chat.id, ultimaBurbuja);
-                }
-            }
-
-            // CHECK 3: ¿Es cierre del cliente?
-            // 🆕 v3.5.4: SOLO considerar cierre si el agente YA dio solución o se despidió
-            // Si NO hay solución/despedida, "Gracias" es cortesía, NO cierre
-            const ultimaBurbuja = leerSoloUltimaBurbujaCliente(chat.nombre);
-            const agenteCerroConversacion = agenteYaDioSolucion() || agenteYaSeDespidio();
-
-            if (agenteCerroConversacion && (esCierreDelCliente(ultimaBurbuja) || esCierreDelCliente(mensaje))) {
-                log(`🙏 ${chat.nombre}: cierre del cliente (post-solución) — no respondo`, 'warn');
-                marcarConSolucion(chat.id);
-                await volverAChat(chatPrevio, chat);
-                return;
-            }
-
-            // CHECK 4: Filtro NO TOCAR
+            // CHECK 3: Filtro NO TOCAR
             const razonNoTocar = esClienteNoTocar(mensaje);
             if (razonNoTocar) {
                 log(`🚨 CLIENTE NO TOCAR (${razonNoTocar}) — alerta`, 'error');
                 chatsCriticos.set(chat.id, Date.now());
-                await volverAChat(chatPrevio, chat);
+                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
 
             // Etapa
-            const etapa = obtenerEtapa(chat.id);
+            const etapa = obtenerEtapa(chat.id, historial);
             log(`🏷️ Etapa: ${etapa}`, 'info');
 
-            // CHECK 5: ¿Etapa crítica?
+            // CHECK 4: ¿Etapa crítica?
             if (etapa === 4) {
                 log(`🔴 ${chat.nombre}: CRÍTICO — alerta`, 'error');
                 chatsCriticos.set(chat.id, Date.now());
-                await volverAChat(chatPrevio, chat);
+                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
 
             // Generar respuesta (saludos espejeados tienen prioridad)
-            const frase = await generarRespuesta(mensaje, etapa, chat.id, chat.nombre);
+            const frase = await generarRespuesta(mensaje, etapa, chat.id, chat.nombre, historial);
             if (!frase) {
                 log(`🚨 Respuesta vetada (escalar)`, 'warn');
                 chatsCriticos.set(chat.id, Date.now());
-                await volverAChat(chatPrevio, chat);
+                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
 
@@ -1891,26 +2082,19 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // Esto evita que otro ciclo procese el mismo chat mientras estamos enviando
             ultimaRespuestaChat.set(chat.id, Date.now());
 
-            // Enviar
-            const ok = await enviarMensaje(frase);
+            // Enviar (por API, sin abrir el chat)
+            const ok = await apiEnviarMensaje(room, frase);
             if (ok) {
-                // Re-actualizar timestamp con el momento real de envío exitoso
                 ultimaRespuestaChat.set(chat.id, Date.now());
+                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 incrementarRespuestas(chat.id);
                 refrescarModoGestion(chat.id);  // 🆕 v3.2.2: renovar timeout
-                // 🆕 v3.4.4: Registrar la última burbuja del cliente como "ya respondida"
-                if (estaEnModoGestion(chat.id)) {
-                    const ultimaBurbuja = leerSoloUltimaBurbujaCliente(chat.nombre);
-                    if (ultimaBurbuja) {
-                        ultimoMensajeClientePorChat.set(chat.id, ultimaBurbuja);
-                    }
-                }
+                log(`✅ Enviado a ${chat.nombre}: "${frase.slice(0, 50)}${frase.length > 50 ? '...' : ''}"`, 'success');
             } else {
+                log(`❌ ${chat.nombre}: falló el envío por API`, 'error');
                 // Si falló el envío, liberar el cooldown (poner timestamp antiguo)
                 ultimaRespuestaChat.set(chat.id, Date.now() - COOLDOWN_MODO_GESTION - 1000);
             }
-
-            await volverAChat(chatPrevio, chat);
         } catch (err) {
             log(`💥 Error: ${err.message}`, 'error');
             console.error(err);
@@ -1920,34 +2104,20 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // para evitar que un ciclo entre antes de que el envío anterior se "asiente"
             setTimeout(() => {
                 chatsBloqueados.delete(chat.id);
-                botCambiandoChat = false;
             }, 3000);
-        }
-    }
-
-    async function volverAChat(chatPrevio, chatActual) {
-        if (!chatPrevio || chatPrevio.id === chatActual.id) return;
-        await sleep(400);
-        const chatsAhora = leerChats();
-        const previo = chatsAhora.find(c => c.nombre === chatPrevio.nombre);
-        if (previo) {
-            previo.elemento.click();
-            log(`↩️ Volviendo a ${chatPrevio.nombre}`, 'info');
         }
     }
 
     // ════════════════════════════════════════════════════════════
     // 🔁 CICLO PRINCIPAL
     // ════════════════════════════════════════════════════════════
-    async function ciclo() {
-        if (!activo || procesando) return;
-        const chats = leerChats();
-        if (chats.length === 0) return;
-        const chatActivo = obtenerChatActivo(chats);
-
-        // 🆕 v3.5.6: NO detenerse si no hay chat activo
-        // Los chats con badge verde SIEMPRE se procesan
-
+    // 🆕 v3.7.1: separado de ciclo() para poder llamarlo repetidas veces
+    // dentro del mismo tick sin duplicar la lógica de elegibilidad.
+    // 🆕 v3.8.0: ya no hay forma de saber "por contenido" si el chat activo
+    // tiene mensaje nuevo sin gastar una llamada a la API — eso ahora lo
+    // confirma procesarChat() consultando el historial. Acá solo quedan los
+    // filtros baratos (sin red): bloqueado, badge, estado marcado, cooldown.
+    function buscarChatElegible(chats, chatActivo, activoEscribiendo) {
         for (const chat of chats) {
             const esElActivo = chatActivo && (chat.id === chatActivo.id);
             const enModoGestion = estaEnModoGestion(chat.id);
@@ -1958,24 +2128,17 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // v3.3.2: Si es el chat activo, solo procesa si está en Modo Gestión
             if (esElActivo && !enModoGestion) continue;
 
-            // 🆕 v3.4.1: Detección diferenciada según contexto
-            // - Chat activo + Modo Gestión: detecta por CONTENIDO del último mensaje del cliente (sin badge)
-            // - Otros chats: detecta por badge verde (como siempre)
-            if (esElActivo && enModoGestion) {
-                // 🆕 v3.4.4: Solo la ÚLTIMA burbuja del cliente (no las 3 últimas concatenadas)
-                // Esto da estabilidad para la comparación de "¿es mensaje nuevo?"
-                const mensajeActual = leerSoloUltimaBurbujaCliente(chat.nombre);
-                const mensajeVisto = ultimoMensajeClientePorChat.get(chat.id) || '';
+            // 🆕 v3.8.0: si el agente está escribiendo un borrador manual en
+            // el chat activo, no lo tratamos como candidato este tick (no
+            // queremos que el bot le "gane de mano" con una respuesta por API
+            // mientras compone la suya). Los DEMÁS chats siguen procesándose
+            // normal — ya no hay ningún salto visual que evitarles.
+            if (esElActivo && activoEscribiendo) continue;
 
-                // Si no hay mensaje del cliente o ya respondimos a ese mensaje, saltar SILENCIOSAMENTE
-                if (!mensajeActual) continue;
-                if (mensajeActual === mensajeVisto) continue;
-                // Hay mensaje nuevo del cliente → seguir con los demás checks
-                log(`🆕 ${chat.nombre}: mensaje nuevo detectado en chat activo`, 'info');
-            } else {
-                // Para los demás chats: badge verde como siempre
-                if (!chat.tieneNuevos) continue;
-            }
+            // El chat activo en Modo Gestión no tiene badge (ya está "visto"
+            // por el agente) — se deja pasar siempre y procesarChat() decide
+            // si realmente hay algo nuevo. Los demás chats sí requieren badge.
+            if (!esElActivo && !chat.tieneNuevos) continue;
 
             // v3.3.2: Logs explícitos sobre por qué NO se procesa (solo en modo gestion)
             if (estaDespedido(chat.id)) {
@@ -2003,10 +2166,52 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 continue;
             }
 
-            await procesarChat(chat, chatActivo);
-            break;
+            return chat;
         }
-        actualizarPanelEstado(chats, chatActivo);
+        return null;
+    }
+
+    // 🆕 v3.7.1: SLA de respuesta (máx. 20s por mensaje). Antes ciclo()
+    // procesaba UN SOLO chat por tick (cada 1.5s) aunque hubiera varios
+    // esperando respuesta al mismo tiempo — con varias conversaciones
+    // simultáneas, las últimas de la fila podían tardar bastante más de
+    // 20s en ser atendidas. Ahora, dentro del mismo tick, se drena todo
+    // el backlog de chats elegibles (releyendo el DOM entre cada uno,
+    // por si un click reordena/re-renderiza la lista de HeroCare), con un
+    // tope de seguridad para no quedar enganchado en un solo tick.
+    // 🆕 v3.7.1: el agente maneja máximo 3 chats simultáneos en la práctica;
+    // 5 deja margen sin permitir un loop desbocado si algo falla.
+    const MAX_CHATS_POR_TICK = 5;
+
+    async function ciclo() {
+        if (!activo || cicloEnCurso) return;
+        cicloEnCurso = true;
+        try {
+            for (let vuelta = 0; vuelta < MAX_CHATS_POR_TICK; vuelta++) {
+                const chats = leerChats();
+                if (chats.length === 0) return;
+
+                let activoEscribiendo = false;
+                if (CONFIG.pausarSiAgenteEscribe) {
+                    const taActivo = document.querySelector(SEL.textarea);
+                    activoEscribiendo = !!(taActivo && taActivo.value && taActivo.value.trim().length > 0);
+                }
+
+                const chatActivo = obtenerChatActivo(chats);
+                const candidato = buscarChatElegible(chats, chatActivo, activoEscribiendo);
+
+                if (!candidato) {
+                    actualizarPanelEstado(chats, chatActivo);
+                    return;
+                }
+
+                await procesarChat(candidato);
+                // vuelve a leer el DOM y buscar el siguiente elegible sin
+                // esperar al próximo tick — así se drena todo el backlog.
+            }
+        } finally {
+            cicloEnCurso = false;
+        }
     }
 
     // ════════════════════════════════════════════════════════════
@@ -2032,7 +2237,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.6.2</span>
+                    <span id="dt-title">🤖 DuTurbo v3.8.0</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2634,10 +2839,15 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     // 🚀 INIT
     // ════════════════════════════════════════════════════════════
     function init() {
+        // 🆕 v3.8.0: instalar los interceptores ANTES que nada — cuanto antes
+        // queden instalados, antes se captura el Authorization Bearer del
+        // propio polling de la app (necesario para toda la API directa).
+        instalarInterceptorFetch();
+        instalarInterceptorXHR();
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.6.2 cargado (fix id de chat estable)', 'success');
+        log('🚀 DuTurbo v3.8.0 cargado (responde por API, sin abrir el chat)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
@@ -2672,7 +2882,11 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             criticos: Object.fromEntries(chatsCriticos),
             imagenes: Object.fromEntries(imagenesPorChat),
             modoGestion: Object.fromEntries(chatsEnModoGestion),
-            mensajesAgenteReales: contarMensajesRealesDelAgente()
+            // 🆕 v3.8.0: diagnóstico de la API directa
+            apiAuthCapturado: !!authCapturado,
+            apiIdentityId: identityIdEfectivo(),
+            apiUsername: usernameEfectivo(),
+            apiRoomsEnCache: Array.from(roomInfoPorTicket.keys())
         })
     };
 })();

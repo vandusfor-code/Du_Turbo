@@ -85,12 +85,19 @@ function etiquetaEtapa(etapa) {
     return 'tranquiliza';
 }
 
-function construirUserPrompt(mensaje, etapa, frasesEnviadas) {
+function construirUserPrompt(mensaje, etapa, frasesEnviadas, palabrasUsadas) {
     const recienteText = Array.isArray(frasesEnviadas) && frasesEnviadas.length > 0
         ? `\nNO REPITAS estas frases ya enviadas: ${frasesEnviadas.map(f => `"${f}"`).join(', ')}`
         : '';
 
-    return `ETAPA: ${etapa} (${etiquetaEtapa(etapa)})${recienteText}
+    // Regla de oro: ni una palabra repetida en el mismo chat. El cliente
+    // (duturbo.user.js) acumula TODAS las palabras significativas ya usadas
+    // en el chat (no solo las últimas frases) y las manda acá.
+    const palabrasText = Array.isArray(palabrasUsadas) && palabrasUsadas.length > 0
+        ? `\nREGLA DE ORO: no uses NINGUNA de estas palabras, ya se usaron en este chat: ${palabrasUsadas.join(', ')}`
+        : '';
+
+    return `ETAPA: ${etapa} (${etiquetaEtapa(etapa)})${recienteText}${palabrasText}
 
 Mensaje del cliente: "${mensaje}"
 
@@ -121,7 +128,7 @@ module.exports = async function handler(req, res) {
     }
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    const { mensaje, etapa, frasesEnviadas } = body;
+    const { mensaje, etapa, frasesEnviadas, palabrasUsadas } = body;
 
     if (!mensaje || !etapa) {
         return res.status(400).json({ error: 'Faltan mensaje o etapa' });
@@ -147,7 +154,7 @@ module.exports = async function handler(req, res) {
             max_tokens: MAX_TOKENS,
             temperature: 0.7,
             system: SYSTEM_PROMPT,
-            messages: [{ role: 'user', content: construirUserPrompt(mensaje, etapa, frasesEnviadas) }]
+            messages: [{ role: 'user', content: construirUserPrompt(mensaje, etapa, frasesEnviadas, palabrasUsadas) }]
         });
 
         texto = (completion.content?.[0]?.text || '').trim();
