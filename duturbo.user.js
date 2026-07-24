@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.8.2
-// @description  v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
+// @version      3.8.3
+// @description  v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -267,18 +267,6 @@
             log(`⚠️ Error enviando mensaje por API: ${e.message}`, 'error');
             return false;
         }
-    }
-
-    // 🆕 v3.8.2: intento de mejor esfuerzo para que HeroCare refresque el
-    // chat que el agente tiene abierto en pantalla después de un envío por
-    // API (que no pasa por su flujo normal de UI). No hay garantía de que
-    // esto haga algo — depende de cómo esté armada la app — pero no navega
-    // ni clickea nada, así que en el peor caso simplemente no tiene efecto.
-    function nudgeRefrescoUI() {
-        try {
-            window.dispatchEvent(new Event('focus'));
-            document.dispatchEvent(new Event('visibilitychange'));
-        } catch (e) { /* no-op */ }
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1847,23 +1835,27 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             chatActivoActual = { id, nombre };
             resetChatLigero(id, nombre);
 
-            // 🆕 v3.5.6: Auto-activar Modo Gestión al abrir un chat
-            // SOLO si el usuario no lo desactivó manualmente
-            if (!chatsGestionDesactivadaManual.has(id)) {
-                activarModoGestion(id, nombre);
-                // 🆕 v3.8.0: Capturar el sort_id del último mensaje (vía API,
-                // ya no hace falta esperar a que renderice el DOM) como "ya
-                // visto" para NO re-responder algo viejo al abrir el chat.
-                (async () => {
-                    const room = await obtenerRoomInfo(id);
-                    if (!room) return;
-                    const crudos = await obtenerHistorialCrudo(room);
-                    if (!crudos) return;
-                    const historial = clasificarMensajesHistorial(crudos, room.name);
-                    const ultimo = historial[historial.length - 1];
-                    if (ultimo) ultimoSortIdProcesado.set(id, ultimo.sortId);
-                })();
-            }
+            // 🆕 v3.8.3: limpiar el preview de inmediato (antes de que llegue
+            // el fetch) para no mostrar la transcripción del chat anterior.
+            renderPreviewChatActivo(id, nombre, []);
+
+            const activarGestion = !chatsGestionDesactivadaManual.has(id);
+            if (activarGestion) activarModoGestion(id, nombre);
+
+            // 🆕 v3.8.0: Capturar el sort_id del último mensaje (vía API, ya
+            // no hace falta esperar a que renderice el DOM) como "ya visto"
+            // para NO re-responder algo viejo al abrir el chat. De paso,
+            // 🆕 v3.8.3: pintar el mini-transcript del panel con lo real.
+            (async () => {
+                const room = await obtenerRoomInfo(id);
+                if (!room) return;
+                const crudos = await obtenerHistorialCrudo(room);
+                if (!crudos) return;
+                const historial = clasificarMensajesHistorial(crudos, room.name);
+                renderPreviewChatActivo(id, nombre, historial);
+                const ultimo = historial[historial.length - 1];
+                if (activarGestion && ultimo) ultimoSortIdProcesado.set(id, ultimo.sortId);
+            })();
 
             log(`👤 Chat activo: ${nombre}${chatsGestionDesactivadaManual.has(id) ? ' (manual OFF)' : ' (ayuda activada)'}`, 'info');
         }, true);
@@ -2099,14 +2091,16 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 incrementarRespuestas(chat.id);
                 refrescarModoGestion(chat.id);  // 🆕 v3.2.2: renovar timeout
                 log(`✅ Enviado a ${chat.nombre}: "${frase.slice(0, 50)}${frase.length > 50 ? '...' : ''}"`, 'success');
-                // 🆕 v3.8.2: si le respondimos al chat que el agente tiene
-                // abierto en pantalla, HeroCare no lo refresca solo (el mensaje
-                // queda "invisible" hasta recargar). Intento de mejor esfuerzo:
-                // muchas apps refrescan datos cuando la pestaña "recupera foco"
-                // — no hay garantía de que HeroCare lo haga así, pero no cuesta
-                // nada intentarlo (no clickea ni navega nada).
+                // 🆕 v3.8.3: HeroCare confirmado que NO refresca solo la vista
+                // del chat activo cuando se le responde por API (el mensaje
+                // se guarda bien, pero queda "invisible" hasta F5). En vez de
+                // depender de eso, se pinta el mini-transcript del panel de
+                // DuTurbo con lo que realmente se mandó — 100% confiable.
                 if (chatActivoActual && chatActivoActual.id === chat.id) {
-                    nudgeRefrescoUI();
+                    const historialConEnviado = historial.concat([{
+                        texto: frase, esAgente: true, sortId: ultimo.sortId + 1
+                    }]);
+                    renderPreviewChatActivo(chat.id, chat.nombre, historialConEnviado);
                 }
             } else {
                 log(`❌ ${chat.nombre}: falló el envío por API`, 'error');
@@ -2255,7 +2249,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.8.2</span>
+                    <span id="dt-title">🤖 DuTurbo v3.8.3</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2272,6 +2266,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                         </label>
                     </div>
                     <div id="dt-estado">Esperando...</div>
+                    <div id="dt-preview"></div>
                     <div id="dt-atajo" style="font-size:10px; color:#94a3b8; padding:4px 6px; margin-bottom:6px; background:rgba(192,223,22,.05); border-radius:4px;">💡 Ctrl+Shift+A = desactivar ayuda en chat activo</div>
                     <button id="dt-sonido" style="width:100%;padding:5px;border:1px solid rgba(255,255,255,0.1);border-radius:5px;background:rgba(255,255,255,0.05);color:#94a3b8;font-size:11px;cursor:pointer;">🔊 Sonido ON</button>
                     <div id="dt-templates" style="display:flex;gap:4px;flex-wrap:wrap;">
@@ -2437,6 +2432,46 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 max-height: 180px;
                 overflow-y: auto;
             }
+
+            /* 🆕 v3.8.3: mini-transcript del chat activo, para ver lo que el
+               bot le mandó sin depender de que HeroCare refresque su vista */
+            #dt-preview {
+                display: none;
+                max-height: 160px;
+                overflow-y: auto;
+                font-size: 10.5px;
+                line-height: 1.4;
+                background: rgba(0,0,0,0.15);
+                border-radius: 6px;
+                padding: 6px;
+                margin-top: 4px;
+            }
+            #dt-preview.dt-preview-visible { display: block; }
+            #dt-preview .dt-preview-titulo {
+                color: #94a3b8;
+                font-size: 9.5px;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+                margin-bottom: 4px;
+            }
+            .dt-preview-msg {
+                padding: 4px 7px;
+                border-radius: 8px;
+                margin-bottom: 4px;
+                max-width: 88%;
+                word-wrap: break-word;
+            }
+            .dt-preview-msg.agente {
+                background: rgba(192,223,22,0.15);
+                color: #e2e8f0;
+                margin-left: auto;
+            }
+            .dt-preview-msg.cliente {
+                background: rgba(255,255,255,0.06);
+                color: #cbd5e1;
+            }
+            #dt-preview::-webkit-scrollbar { width: 5px; }
+            #dt-preview::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
 
             /* Logs */
             #dt-logs {
@@ -2775,6 +2810,37 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         if (status) status.classList.toggle('on', activo);
     }
 
+    function escapeHtml(s) {
+        return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    // 🆕 v3.8.3: mini-transcript del chat activo dentro del panel de DuTurbo,
+    // para que el agente vea lo que el bot mandó SIN depender de que HeroCare
+    // refresque su propia vista (confirmado que no lo hace en vivo).
+    function renderPreviewChatActivo(chatId, nombreCliente, historial) {
+        const div = document.getElementById('dt-preview');
+        if (!div) return;
+        // Si mientras tanto el agente cambió de chat, no pisar la vista nueva
+        // con datos viejos que llegaron tarde.
+        if (!chatActivoActual || chatActivoActual.id !== chatId) return;
+
+        if (!historial || historial.length === 0) {
+            div.classList.remove('dt-preview-visible');
+            div.innerHTML = '';
+            return;
+        }
+
+        const ultimos = historial.slice(-6);
+        const filas = ultimos.map(m => {
+            const texto = m.esAgente ? m.texto : limpiarTextoBurbuja(m.texto, nombreCliente);
+            const clase = m.esAgente ? 'agente' : 'cliente';
+            return `<div class="dt-preview-msg ${clase}">${escapeHtml(texto)}</div>`;
+        }).join('');
+        div.innerHTML = `<div class="dt-preview-titulo">💬 ${escapeHtml(nombreCliente)} — lo que ya se mandó (esto SÍ está confirmado, aunque HeroCare tarde en mostrarlo)</div>${filas}`;
+        div.classList.add('dt-preview-visible');
+        div.scrollTop = div.scrollHeight;
+    }
+
     function actualizarPanelEstado(chats, chatActivo) {
         const div = document.getElementById('dt-estado');
         if (!div) return;
@@ -2865,7 +2931,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.8.2 cargado (intento de refresco tras enviar)', 'success');
+        log('🚀 DuTurbo v3.8.3 cargado (mini-transcript del chat activo en el panel)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
