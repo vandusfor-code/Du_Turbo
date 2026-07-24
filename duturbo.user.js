@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.8.3
-// @description  v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
+// @version      3.8.4
+// @description  v3.8.4: Nuevo boton 📌 en el header del panel — abre un widget aparte, chiquito y movible por toda la pantalla, que muestra SOLO el mini-transcript del chat activo (sin el panel completo tapando la pantalla). El boton flotante sigue funcionando igual (abre el panel completo y oculta el widget mini). Se recuerda la posicion y si estaba activo entre recargas. v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -2249,7 +2249,8 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.8.3</span>
+                    <span id="dt-title">🤖 DuTurbo v3.8.4</span>
+                    <button id="dt-mini-toggle" title="Solo transcripción flotante (movible)">📌</button>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2567,12 +2568,97 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 border-color: #fca5a5;
             }
             .dt-btn-gestion.off:hover { background: #dc2626; color: #fff; }
+
+            /* 🆕 v3.8.4: widget flotante e independiente, solo con el
+               mini-transcript, para no tapar la pantalla con el panel entero */
+            #dt-mini-toggle {
+                background: transparent;
+                border: none;
+                color: #94a3b8;
+                cursor: pointer;
+                font-size: 13px;
+                padding: 2px 4px;
+                margin-right: 4px;
+            }
+            #dt-mini-toggle:hover { color: #C0DF16; }
+
+            #dt-mini-transcript {
+                display: none;
+                position: fixed;
+                left: 20px;
+                top: 100px;
+                width: 230px;
+                z-index: 999998;
+                background: #1e293b;
+                border: 1px solid rgba(192,223,22,0.25);
+                border-radius: 10px;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+                font-family: system-ui, -apple-system, sans-serif;
+                overflow: hidden;
+            }
+            #dt-mini-transcript.dt-mini-visible { display: block; }
+            #dt-mini-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 6px;
+                padding: 6px 8px;
+                background: rgba(192,223,22,0.08);
+                cursor: grab;
+                border-bottom: 1px solid rgba(255,255,255,0.06);
+            }
+            #dt-mini-header:active { cursor: grabbing; }
+            #dt-mini-nombre {
+                color: #e2e8f0;
+                font-size: 11px;
+                font-weight: 600;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #dt-mini-cerrar {
+                background: transparent;
+                border: none;
+                color: #94a3b8;
+                cursor: pointer;
+                font-size: 13px;
+                flex-shrink: 0;
+            }
+            #dt-mini-cerrar:hover { color: #C0DF16; }
+            #dt-mini-contenido {
+                max-height: 220px;
+                overflow-y: auto;
+                padding: 6px;
+                font-size: 10.5px;
+            }
+            #dt-mini-contenido::-webkit-scrollbar { width: 5px; }
+            #dt-mini-contenido::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
         `;
 
         const style = document.createElement('style');
         style.textContent = css;
         document.head.appendChild(style);
         document.body.appendChild(wrapper);
+
+        // 🆕 v3.8.4: widget del mini-transcript, independiente del wrapper
+        // (así se puede mover por toda la pantalla sin depender de dónde
+        // esté anclado el panel/botón principal).
+        const miniWidget = document.createElement('div');
+        miniWidget.id = 'dt-mini-transcript';
+        miniWidget.innerHTML = `
+            <div id="dt-mini-header">
+                <span id="dt-mini-nombre">💬 Sin chat activo</span>
+                <button id="dt-mini-cerrar" title="Volver al panel completo">⬆️</button>
+            </div>
+            <div id="dt-mini-contenido"></div>
+        `;
+        document.body.appendChild(miniWidget);
+
+        const miniPosGuardada = JSON.parse(localStorage.getItem('duturbo_mini_pos') || 'null');
+        if (miniPosGuardada) {
+            miniWidget.style.left = miniPosGuardada.left + 'px';
+            miniWidget.style.top = miniPosGuardada.top + 'px';
+        }
 
         // Restaurar posición guardada del wrapper
         if (posGuardada) {
@@ -2591,11 +2677,31 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         const expandir = () => {
             wrapper.classList.add('expanded');
             localStorage.setItem('duturbo_expandido', '1');
+            ocultarMini();
         };
         const minimizar = () => {
             wrapper.classList.remove('expanded');
             localStorage.setItem('duturbo_expandido', '0');
         };
+
+        // 🆕 v3.8.4: MODO TRANSCRIPCIÓN FLOTANTE (widget aparte, movible)
+        const mostrarMini = () => {
+            minimizar();
+            miniWidget.classList.add('dt-mini-visible');
+            localStorage.setItem('duturbo_mini_activo', '1');
+        };
+        const ocultarMini = () => {
+            miniWidget.classList.remove('dt-mini-visible');
+            localStorage.setItem('duturbo_mini_activo', '0');
+        };
+
+        // Restaurar si el widget mini estaba visible en la sesión anterior
+        if (localStorage.getItem('duturbo_mini_activo') === '1') {
+            miniWidget.classList.add('dt-mini-visible');
+        }
+
+        document.getElementById('dt-mini-toggle').onclick = mostrarMini;
+        document.getElementById('dt-mini-cerrar').onclick = expandir;
 
         const floatingBtn = document.getElementById('dt-floating-btn');
         floatingBtn.addEventListener('click', (e) => {
@@ -2607,6 +2713,37 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         });
 
         document.getElementById('dt-min').onclick = minimizar;
+
+        // ──────────────────────────────────────────
+        // DRAG DEL WIDGET MINI (independiente del wrapper principal)
+        // ──────────────────────────────────────────
+        let dragMini = false, miniStartX, miniStartY, miniInitialX, miniInitialY;
+        const miniHeader = document.getElementById('dt-mini-header');
+        miniHeader.addEventListener('mousedown', (e) => {
+            if (e.target.id === 'dt-mini-cerrar') return;
+            dragMini = true;
+            miniStartX = e.clientX;
+            miniStartY = e.clientY;
+            const rect = miniWidget.getBoundingClientRect();
+            miniInitialX = rect.left;
+            miniInitialY = rect.top;
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!dragMini) return;
+            const dx = e.clientX - miniStartX;
+            const dy = e.clientY - miniStartY;
+            const maxX = window.innerWidth - 230;
+            const maxY = window.innerHeight - 60;
+            miniWidget.style.left = Math.max(0, Math.min(maxX, miniInitialX + dx)) + 'px';
+            miniWidget.style.top = Math.max(0, Math.min(maxY, miniInitialY + dy)) + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (!dragMini) return;
+            dragMini = false;
+            const rect = miniWidget.getBoundingClientRect();
+            localStorage.setItem('duturbo_mini_pos', JSON.stringify({ left: rect.left, top: rect.top }));
+        });
 
         // ──────────────────────────────────────────
         // DRAG DEL BOTONCITO
@@ -2631,7 +2768,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         let dragHeader = false, headerStartX, headerStartY, headerInitialX, headerInitialY;
         const header = document.getElementById('dt-header');
         header.addEventListener('mousedown', (e) => {
-            if (e.target.id === 'dt-min') return;
+            if (e.target.id === 'dt-min' || e.target.id === 'dt-mini-toggle') return;
             dragHeader = true;
             headerStartX = e.clientX;
             headerStartY = e.clientY;
@@ -2814,19 +2951,26 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
-    // 🆕 v3.8.3: mini-transcript del chat activo dentro del panel de DuTurbo,
-    // para que el agente vea lo que el bot mandó SIN depender de que HeroCare
-    // refresque su propia vista (confirmado que no lo hace en vivo).
+    // 🆕 v3.8.3: mini-transcript del chat activo, para que el agente vea lo
+    // que el bot mandó SIN depender de que HeroCare refresque su propia
+    // vista (confirmado que no lo hace en vivo).
+    // 🆕 v3.8.4: pinta el mismo contenido en DOS lugares: el panel completo
+    // (#dt-preview) y el widget mini flotante e independiente
+    // (#dt-mini-contenido), estén o no visibles — así, al togglear entre
+    // uno y otro, siempre muestran el dato más reciente sin re-consultar nada.
     function renderPreviewChatActivo(chatId, nombreCliente, historial) {
         const div = document.getElementById('dt-preview');
-        if (!div) return;
+        const miniDiv = document.getElementById('dt-mini-contenido');
+        const miniNombre = document.getElementById('dt-mini-nombre');
+        if (!div && !miniDiv) return;
         // Si mientras tanto el agente cambió de chat, no pisar la vista nueva
         // con datos viejos que llegaron tarde.
         if (!chatActivoActual || chatActivoActual.id !== chatId) return;
 
         if (!historial || historial.length === 0) {
-            div.classList.remove('dt-preview-visible');
-            div.innerHTML = '';
+            if (div) { div.classList.remove('dt-preview-visible'); div.innerHTML = ''; }
+            if (miniDiv) miniDiv.innerHTML = '';
+            if (miniNombre) miniNombre.textContent = `💬 ${nombreCliente || 'Sin chat activo'}`;
             return;
         }
 
@@ -2836,9 +2980,17 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             const clase = m.esAgente ? 'agente' : 'cliente';
             return `<div class="dt-preview-msg ${clase}">${escapeHtml(texto)}</div>`;
         }).join('');
-        div.innerHTML = `<div class="dt-preview-titulo">💬 ${escapeHtml(nombreCliente)} — lo que ya se mandó (esto SÍ está confirmado, aunque HeroCare tarde en mostrarlo)</div>${filas}`;
-        div.classList.add('dt-preview-visible');
-        div.scrollTop = div.scrollHeight;
+
+        if (div) {
+            div.innerHTML = `<div class="dt-preview-titulo">💬 ${escapeHtml(nombreCliente)} — lo que ya se mandó (esto SÍ está confirmado, aunque HeroCare tarde en mostrarlo)</div>${filas}`;
+            div.classList.add('dt-preview-visible');
+            div.scrollTop = div.scrollHeight;
+        }
+        if (miniDiv) {
+            miniDiv.innerHTML = filas;
+            miniDiv.scrollTop = miniDiv.scrollHeight;
+        }
+        if (miniNombre) miniNombre.textContent = `💬 ${nombreCliente}`;
     }
 
     function actualizarPanelEstado(chats, chatActivo) {
@@ -2931,7 +3083,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.8.3 cargado (mini-transcript del chat activo en el panel)', 'success');
+        log('🚀 DuTurbo v3.8.4 cargado (widget mini-transcript flotante y movible)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
