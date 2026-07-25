@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.8.4
-// @description  v3.8.4: Nuevo boton 📌 en el header del panel — abre un widget aparte, chiquito y movible por toda la pantalla, que muestra SOLO el mini-transcript del chat activo (sin el panel completo tapando la pantalla). El boton flotante sigue funcionando igual (abre el panel completo y oculta el widget mini). Se recuerda la posicion y si estaba activo entre recargas. v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
+// @version      3.8.5
+// @description  v3.8.5: FIX CRITICO de la regla de oro — Modo Inteligente (Claude) nunca registraba sus propias palabras en el sistema anti-repeticion (solo en una lista aparte usada nada mas para el prompt), asi que el chequeo quedaba ciego a todo lo que la IA ya habia dicho y podia repetir la misma frase sin ser detectado. Ademas, ahora cada procesamiento re-sincroniza la regla de oro contra el historial REAL de la API (no solo la memoria del script), para que se autocorrija sola ante cualquier otro hueco futuro. v3.8.4: Nuevo boton 📌 en el header del panel — abre un widget aparte, chiquito y movible por toda la pantalla, que muestra SOLO el mini-transcript del chat activo (sin el panel completo tapando la pantalla). El boton flotante sigue funcionando igual (abre el panel completo y oculta el widget mini). Se recuerda la posicion y si estaba activo entre recargas. v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -1747,6 +1747,14 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             return null;
         }
 
+        // 🆕 v3.8.5: FIX CRÍTICO — generarRespuestaIA() nunca registraba sus
+        // palabras acá (solo en frasesEnviadasPorChat, una lista aparte que
+        // solo se usa para el prompt). Eso dejaba ciego al chequeo de
+        // "regla de oro" ante TODO lo que la IA ya había dicho, así que
+        // Modo Inteligente podía repetir la misma frase sin ser detectado.
+        // Para el camino Rápido esto ya se hacía adentro (llamada idempotente).
+        registrarPalabrasUsadas(chatId, frase);
+
         frase = personalizarFrase(frase, nombreCliente, chatId);
         return frase;
     }
@@ -2011,6 +2019,13 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             const historial = clasificarMensajesHistorial(crudos, room.name);
             const ultimo = historial[historial.length - 1];
 
+            // 🆕 v3.8.5: re-sincronizar la "regla de oro" contra el historial
+            // REAL de la API en cada procesamiento, en vez de confiar solo en
+            // que el script haya registrado bien cada palabra en el momento
+            // (un fix reciente encontró un hueco justo ahí). El historial es
+            // la fuente de verdad — así el sistema se autocorrige solo.
+            historial.filter(m => m.esAgente).forEach(m => registrarPalabrasUsadas(chat.id, m.texto));
+
             // Nada pendiente: badge desactualizado, o el agente ya respondió
             // manualmente desde la UI (esto también cuenta como "esAgente").
             if (!ultimo || ultimo.esAgente) return;
@@ -2249,7 +2264,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.8.4</span>
+                    <span id="dt-title">🤖 DuTurbo v3.8.5</span>
                     <button id="dt-mini-toggle" title="Solo transcripción flotante (movible)">📌</button>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
@@ -3083,7 +3098,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.8.4 cargado (widget mini-transcript flotante y movible)', 'success');
+        log('🚀 DuTurbo v3.8.5 cargado (fix critico: regla de oro en Modo Inteligente)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
