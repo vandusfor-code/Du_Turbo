@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.8.7
-// @description  v3.8.7: El bot escalaba a "critico" (dejaba de responder) despues de solo 5 respuestas en el mismo chat, pensado para no abandonar un chat pero que rompia el proposito real del bot: sostener al cliente mientras el agente gestiona varios chats a la vez, aunque mande 7+ mensajes seguidos. El umbral (CONFIG.umbralCritico, que existia pero estaba desconectado) ahora es 20, bien por encima del uso real, dejando que la razon real para escalar sea quedarse sin frase libre de repeticion (regla de oro) en vez de un conteo arbitrario. v3.8.6: SLA bajado de 20s a 10s por mensaje. ciclo() ahora procesa TODOS los chats elegibles del tick EN PARALELO (Promise.all) en vez de uno por uno — sin la restriccion de "una sola pantalla abierta" (ya no aplica, todo es API) no hay motivo para poner un chat a esperar a que termine otro. Se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el nuevo tope. v3.8.5: FIX CRITICO de la regla de oro — Modo Inteligente (Claude) nunca registraba sus propias palabras en el sistema anti-repeticion (solo en una lista aparte usada nada mas para el prompt), asi que el chequeo quedaba ciego a todo lo que la IA ya habia dicho y podia repetir la misma frase sin ser detectado. Ademas, ahora cada procesamiento re-sincroniza la regla de oro contra el historial REAL de la API (no solo la memoria del script), para que se autocorrija sola ante cualquier otro hueco futuro. v3.8.4: Nuevo boton 📌 en el header del panel — abre un widget aparte, chiquito y movible por toda la pantalla, que muestra SOLO el mini-transcript del chat activo (sin el panel completo tapando la pantalla). El boton flotante sigue funcionando igual (abre el panel completo y oculta el widget mini). Se recuerda la posicion y si estaba activo entre recargas. v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
+// @version      3.8.8
+// @description  v3.8.8: FIX — chatsCriticos (el estado que hace que el bot deje de responder un chat) nunca expiraba, a diferencia de despedido/solucion que si tenian vencimiento de 15 min. Una vez marcado critico por cualquier motivo (incluida una falla transitoria de la IA o quedarse sin frase libre de repeticion por un momento), el chat quedaba abandonado para siempre hasta resetearlo a mano. Ahora expira a los 2 minutos y el bot vuelve a intentar solo. v3.8.7: El bot escalaba a "critico" (dejaba de responder) despues de solo 5 respuestas en el mismo chat, pensado para no abandonar un chat pero que rompia el proposito real del bot: sostener al cliente mientras el agente gestiona varios chats a la vez, aunque mande 7+ mensajes seguidos. El umbral (CONFIG.umbralCritico, que existia pero estaba desconectado) ahora es 20, bien por encima del uso real, dejando que la razon real para escalar sea quedarse sin frase libre de repeticion (regla de oro) en vez de un conteo arbitrario. v3.8.6: SLA bajado de 20s a 10s por mensaje. ciclo() ahora procesa TODOS los chats elegibles del tick EN PARALELO (Promise.all) en vez de uno por uno — sin la restriccion de "una sola pantalla abierta" (ya no aplica, todo es API) no hay motivo para poner un chat a esperar a que termine otro. Se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el nuevo tope. v3.8.5: FIX CRITICO de la regla de oro — Modo Inteligente (Claude) nunca registraba sus propias palabras en el sistema anti-repeticion (solo en una lista aparte usada nada mas para el prompt), asi que el chequeo quedaba ciego a todo lo que la IA ya habia dicho y podia repetir la misma frase sin ser detectado. Ademas, ahora cada procesamiento re-sincroniza la regla de oro contra el historial REAL de la API (no solo la memoria del script), para que se autocorrija sola ante cualquier otro hueco futuro. v3.8.4: Nuevo boton 📌 en el header del panel — abre un widget aparte, chiquito y movible por toda la pantalla, que muestra SOLO el mini-transcript del chat activo (sin el panel completo tapando la pantalla). El boton flotante sigue funcionando igual (abre el panel completo y oculta el widget mini). Se recuerda la posicion y si estaba activo entre recargas. v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -1967,6 +1967,28 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         return true;
     }
 
+    // 🆕 v3.8.8: FIX — chatsCriticos nunca expiraba (a diferencia de
+    // despedido/solución, que sí). Una vez marcado crítico por CUALQUIER
+    // motivo (filtro NO TOCAR, 20+ respuestas, o quedarse sin frase libre de
+    // repetición), el bot dejaba de responder ese chat PARA SIEMPRE hasta
+    // que alguien lo reseteara a mano — rompe la regla de "nunca dejar de
+    // responder". Ahora expira a los 2 minutos: si fue algo transitorio
+    // (p. ej. la IA falló una vez, o se quedó sin variedad momentáneamente)
+    // el bot vuelve a intentar solo. Si el motivo real sigue ahí (cliente
+    // sigue diciendo lo mismo), se vuelve a marcar — no se pierde la alerta,
+    // solo deja de ser un bloqueo eterno.
+    const EXPIRACION_CRITICO = 2 * 60 * 1000;
+
+    function estaCritico(chatId) {
+        const ts = chatsCriticos.get(chatId);
+        if (!ts) return false;
+        if (Date.now() - ts > EXPIRACION_CRITICO) {
+            chatsCriticos.delete(chatId);
+            return false;
+        }
+        return true;
+    }
+
     // ════════════════════════════════════════════════════════════
     // ✉️ ENVIAR MENSAJE A HEROCARE — SOLO para el botón manual "pegar
     // template" (dt-tpl-btn), que escribe en el chat que el agente ya
@@ -2190,7 +2212,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 if (enModoGestion) log(`⏭️ ${chat.nombre}: solución dada (skip)`, 'info');
                 continue;
             }
-            if (chatsCriticos.has(chat.id)) {
+            if (estaCritico(chat.id)) {
                 if (enModoGestion) log(`⏭️ ${chat.nombre}: crítico (skip)`, 'info');
                 continue;
             }
@@ -2273,7 +2295,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.8.7</span>
+                    <span id="dt-title">🤖 DuTurbo v3.8.8</span>
                     <button id="dt-mini-toggle" title="Solo transcripción flotante (movible)">📌</button>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
@@ -3034,7 +3056,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             const esActivo = chatActivo && c.id === chatActivo.id;
             const despedido = estaDespedido(c.id);
             const conSolucion = tieneSolucion(c.id);
-            const critico = chatsCriticos.has(c.id);
+            const critico = estaCritico(c.id);
             const enGestion = estaEnModoGestion(c.id);
             const etapa = respuestasPorChat.get(c.id) || 0;
 
@@ -3107,7 +3129,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.8.7 cargado (umbral critico subido a 20 respuestas)', 'success');
+        log('🚀 DuTurbo v3.8.8 cargado (fix: critico ya no dura para siempre)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
