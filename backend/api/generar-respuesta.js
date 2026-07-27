@@ -67,7 +67,9 @@ CONTEXTO QUE RECIBES:
 - Etapa del chat (1=apertura, 2=escucha, 3=tranquiliza)
 - Si el agente ya escribió mensajes previos REALES (no protocolarios)
 - Respuestas previas del bot (NO REPITAS)
-- Mensaje actual del cliente
+- La CONVERSACIÓN RECIENTE completa (últimos turnos, cliente y vos) — leela
+  para responder con contexto real, no como si fuera el primer mensaje
+- El último mensaje del cliente (a ese es al que tenés que responder)
 
 INSTRUCCIÓN POR ETAPA:
 - Etapa 1: empatía corta + pedir espera
@@ -77,6 +79,11 @@ INSTRUCCIÓN POR ETAPA:
 Si el agente YA escribió mensajes reales (no solo saludos), NUNCA respondas con apertura empática.
 Usa siempre respuesta de etapa 2 o 3.
 
+RECORDATORIO FINAL (esto se verifica automáticamente, no lo ignores):
+NUNCA incluyas montos, plazos concretos ("mañana", "en 10 minutos"), cupones,
+ni verbos de promesa ("realizaré", "enviaré", "acreditaré") — si tu respuesta
+tiene algo de esto, se descarta entera y no llega al cliente.
+
 Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
 
 function etiquetaEtapa(etapa) {
@@ -85,7 +92,7 @@ function etiquetaEtapa(etapa) {
     return 'tranquiliza';
 }
 
-function construirUserPrompt(mensaje, etapa, frasesEnviadas, palabrasUsadas) {
+function construirUserPrompt(mensaje, etapa, frasesEnviadas, palabrasUsadas, transcript) {
     const recienteText = Array.isArray(frasesEnviadas) && frasesEnviadas.length > 0
         ? `\nNO REPITAS estas frases ya enviadas: ${frasesEnviadas.map(f => `"${f}"`).join(', ')}`
         : '';
@@ -97,9 +104,17 @@ function construirUserPrompt(mensaje, etapa, frasesEnviadas, palabrasUsadas) {
         ? `\nREGLA DE ORO: no uses NINGUNA de estas palabras, ya se usaron en este chat: ${palabrasUsadas.join(', ')}`
         : '';
 
-    return `ETAPA: ${etapa} (${etiquetaEtapa(etapa)})${recienteText}${palabrasText}
+    // 🆕 v3.8.9: antes solo se mandaba el último mensaje del cliente aislado,
+    // sin ver el ida y vuelta real — en chats largos (varios turnos durante
+    // 2+ minutos) eso podía sonar incoherente. Ahora se manda la
+    // transcripción reciente completa para responder con contexto real.
+    const transcriptText = Array.isArray(transcript) && transcript.length > 0
+        ? `\n\nCONVERSACIÓN RECIENTE (de más vieja a más nueva):\n${transcript.map(m => `${m.quien === 'agente' ? 'Vos' : 'Cliente'}: "${m.texto}"`).join('\n')}`
+        : '';
 
-Mensaje del cliente: "${mensaje}"
+    return `ETAPA: ${etapa} (${etiquetaEtapa(etapa)})${recienteText}${palabrasText}${transcriptText}
+
+Último mensaje del cliente (a esto tenés que responder): "${mensaje}"
 
 Tu respuesta:`;
 }
@@ -128,7 +143,7 @@ module.exports = async function handler(req, res) {
     }
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    const { mensaje, etapa, frasesEnviadas, palabrasUsadas } = body;
+    const { mensaje, etapa, frasesEnviadas, palabrasUsadas, transcript } = body;
 
     if (!mensaje || !etapa) {
         return res.status(400).json({ error: 'Faltan mensaje o etapa' });
@@ -154,7 +169,7 @@ module.exports = async function handler(req, res) {
             max_tokens: MAX_TOKENS,
             temperature: 0.7,
             system: SYSTEM_PROMPT,
-            messages: [{ role: 'user', content: construirUserPrompt(mensaje, etapa, frasesEnviadas, palabrasUsadas) }]
+            messages: [{ role: 'user', content: construirUserPrompt(mensaje, etapa, frasesEnviadas, palabrasUsadas, transcript) }]
         });
 
         texto = (completion.content?.[0]?.text || '').trim();
