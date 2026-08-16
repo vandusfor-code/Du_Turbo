@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.9.1
-// @description  v3.9.1: Auditoria post-v3.9.0, dos fixes reales encontrados. 1) chatsCriticos expiraba a los 2 min por igual para los tres motivos — pero uno es el filtro NO TOCAR (estafa/supervisor/denuncia); si el agente tardaba mas de 2 min, el bot podia volver a auto-responder solo a un cliente que ya habia pedido escalar. Ahora NO TOCAR queda pegado (sticky) hasta que el agente lo atienda de verdad; los otros dos motivos (etapa critica, sin frase libre) siguen expirando igual. 2) ciclo() solo refrescaba el panel (lista, timers, indicador de critico) cuando NO habia nada para procesar — con la cola llena quedaba desactualizado hasta el proximo tick ocioso. Ahora siempre se refresca al final. v3.9.0: Cambio grande por pedido explicito — se elimina el Modo Inteligente (IA) por completo, queda solo Modo Rapido (plantillas/regex), mas liviano. Se elimina Modo Gestion: el chat que el agente tiene abierto ya NO se responde automaticamente (evita el problema de HeroCare no refrescar solo la vista cuando se respondia por API en el chat activo). El envio vuelve a ser 100% visible por UI real (abre el chat, escribe, manda, vuelve). La LECTURA sigue por la API directa de HeroCare. Alerta sonora inmediata + indicador visual persistente en el boton flotante cuando un chat queda critico.
+// @version      3.9.2
+// @description  v3.9.2: Auditoria exhaustiva de todo el archivo (patrones, generacion de frases, regla de oro, lectura de chats, click-tracking, procesarChat, ciclo, panel, API debug) — sin bugs funcionales nuevos encontrados, motor confirmado solido. Limpieza: se saca agentJwt (se guardaba pero ya nadie lo lee desde que el envio volvio a ser por UI en v3.9.0) y se corrige el comentario de "API DIRECTA" que todavia describia el envio por API (ya es solo lectura). v3.9.1: chatsCriticos por NO TOCAR ahora es sticky (no expira solo a los 2 min, a diferencia de etapa critica/sin frase libre); ciclo() ahora refresca el panel siempre al final, no solo cuando no hay nada que procesar. v3.9.0: se elimina Modo Inteligente (IA) y Modo Gestion; el envio vuelve a ser 100% visible por UI real (abre el chat, escribe, manda, vuelve); la lectura sigue por la API directa de HeroCare; alerta sonora + indicador visual persistente cuando un chat queda critico.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -63,16 +63,19 @@
     };
 
     // ════════════════════════════════════════════════════════════
-    // 🌐 API DIRECTA DE HEROCARE (v3.8.0)
-    // Antes, para leer/responder un chat en segundo plano, el bot tenía que
-    // clickearlo (abrirlo visualmente) para poder leer el DOM y escribir en
-    // el textarea — eso era lo que "saltaba" de chat en chat e interrumpía
-    // al agente. Inspeccionando el Network tab se encontró la API interna
-    // que usa HeroCare para lo mismo, así que ahora el bot le habla
-    // directo sin abrir nada:
-    //   1. GET  /tickets/{ticketId}/room                → roomId + token de chat
+    // 🌐 API DIRECTA DE HEROCARE (v3.8.0, solo LECTURA desde v3.9.0)
+    // Inspeccionando el Network tab se encontró la API interna que usa
+    // HeroCare para leer una conversación sin necesidad de tenerla abierta:
+    //   1. GET  /tickets/{ticketId}/room                → datos del room
     //   2. GET  /rooms/{roomId}/history?roomName=...     → últimos mensajes
-    //   3. POST /rooms/send-message                      → enviar la respuesta
+    // 🆕 v3.9.0: el ENVÍO ya NO pasa por esta API (antes había un tercer
+    // paso, POST /rooms/send-message) — volvió a ser por la UI real
+    // (clickear el chat + escribir en el textarea, ver enviarMensaje/
+    // procesarChat), porque HeroCare no refrescaba su propia vista cuando
+    // se respondía por acá en silencio al chat que el agente tenía abierto.
+    // La lectura se quedó por API porque es más confiable (identity_id del
+    // servidor) y no tiene ningún efecto visual, así que no había motivo
+    // para volver a scrapear el DOM para eso.
     // Ningún token se hardcodea: el Authorization Bearer de sesión se
     // captura en caliente interceptando el fetch()/XHR nativo que la propia
     // app ya dispara constantemente (polling), así sigue siendo válido
@@ -83,7 +86,7 @@
     let authCapturado = null;
     let identityIdCapturado = null;
     let usernameCapturado = null;
-    const roomInfoPorTicket = new Map(); // ticketId -> {ticketId, id, agentJwt, name, entityId, gei}
+    const roomInfoPorTicket = new Map(); // ticketId -> {ticketId, id, name, entityId, gei}
 
     function decodificarJWT(token) {
         try {
@@ -187,10 +190,12 @@
             });
             if (!resp.ok) return null;
             const data = await resp.json();
+            // 🐛 fix (auditoría v3.9.1): ya no se guarda agentJwt — era solo
+            // para apiEnviarMensaje (removida en v3.9.0, el envío volvió a
+            // ser por UI real). Guardarlo era dato muerto sin ningún lector.
             const info = {
                 ticketId,
                 id: data.id,
-                agentJwt: data.agentJwt,
                 name: data.name,
                 entityId: data.entityId,
                 gei: (data.helpcenter_context && data.helpcenter_context.gei) || data.entityId
@@ -2018,7 +2023,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.9.1</span>
+                    <span id="dt-title">🤖 DuTurbo v3.9.2</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2581,7 +2586,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.9.1 cargado (solo Modo Rápido, envío 100% visible)', 'success');
+        log('🚀 DuTurbo v3.9.2 cargado (solo Modo Rápido, envío 100% visible)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
