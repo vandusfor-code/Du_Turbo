@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.9.0
-// @description  v3.9.0: Cambio grande por pedido explicito — se elimina el Modo Inteligente (IA) por completo, queda solo Modo Rapido (plantillas/regex), mas liviano. Se elimina Modo Gestion: el chat que el agente tiene abierto ya NO se responde automaticamente (evita el problema de HeroCare no refrescar solo la vista cuando se respondia por API en el chat activo); el agente siempre ve la respuesta en vivo. El envio vuelve a ser 100% visible: se abre el chat (click), se escribe y se manda por la UI real, y se vuelve al chat donde estaba el agente — igual que las versiones anteriores a v3.8.0. La LECTURA de mensajes se mantiene por la API directa de HeroCare (mas confiable que leer el DOM), solo el ENVIO volvio a ser por UI. Se agrega alerta sonora inmediata + indicador visual persistente en el boton flotante (incluso minimizado) cuando un chat queda critico (filtro NO TOCAR), para que sea imposible no notarlo.
+// @version      3.9.1
+// @description  v3.9.1: Auditoria post-v3.9.0, dos fixes reales encontrados. 1) chatsCriticos expiraba a los 2 min por igual para los tres motivos — pero uno es el filtro NO TOCAR (estafa/supervisor/denuncia); si el agente tardaba mas de 2 min, el bot podia volver a auto-responder solo a un cliente que ya habia pedido escalar. Ahora NO TOCAR queda pegado (sticky) hasta que el agente lo atienda de verdad; los otros dos motivos (etapa critica, sin frase libre) siguen expirando igual. 2) ciclo() solo refrescaba el panel (lista, timers, indicador de critico) cuando NO habia nada para procesar — con la cola llena quedaba desactualizado hasta el proximo tick ocioso. Ahora siempre se refresca al final. v3.9.0: Cambio grande por pedido explicito — se elimina el Modo Inteligente (IA) por completo, queda solo Modo Rapido (plantillas/regex), mas liviano. Se elimina Modo Gestion: el chat que el agente tiene abierto ya NO se responde automaticamente (evita el problema de HeroCare no refrescar solo la vista cuando se respondia por API en el chat activo). El envio vuelve a ser 100% visible por UI real (abre el chat, escribe, manda, vuelve). La LECTURA sigue por la API directa de HeroCare. Alerta sonora inmediata + indicador visual persistente en el boton flotante cuando un chat queda critico.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -1699,24 +1699,35 @@
     // solo deja de ser un bloqueo eterno.
     const EXPIRACION_CRITICO = 2 * 60 * 1000;
 
+    // 🐛 fix (auditoría v3.9.0): la expiración a 2 min (v3.8.8) se aplicaba
+    // por igual a los TRES motivos de "crítico" — pero uno de ellos es el
+    // filtro NO TOCAR (estafa, pedido de supervisor, amenaza legal/denuncia).
+    // Si el agente tardaba más de 2 min en atenderlo y el cliente escribía
+    // de nuevo sin repetir la MISMA frase gatillo, el bot podía volver a
+    // auto-responder con una frase genérica a un cliente que ya había
+    // pedido escalar — justo lo que este filtro existe para evitar. Ahora
+    // NO TOCAR queda "pegado" (sticky) hasta que el agente lo atienda de
+    // verdad (click manual en el chat limpia chatsCriticos vía
+    // resetChatLigero); los otros dos motivos (etapa crítica, sin frase
+    // libre de repetición) siguen expirando a los 2 min como antes.
     function estaCritico(chatId) {
-        const ts = chatsCriticos.get(chatId);
-        if (!ts) return false;
-        if (Date.now() - ts > EXPIRACION_CRITICO) {
+        const entry = chatsCriticos.get(chatId);
+        if (!entry) return false;
+        if (!entry.sticky && Date.now() - entry.ts > EXPIRACION_CRITICO) {
             chatsCriticos.delete(chatId);
             return false;
         }
         return true;
     }
 
-    // 🆕 v3.9.0: la alerta de crítico (NO TOCAR, etapa crítica, sin frase
-    // libre) antes era pasiva — una fila roja en el panel que solo se nota
-    // si estás mirando el panel expandido. Ahora suena de inmediato y deja
-    // el botón flotante marcado (ver actualizarPanelEstado), así se nota
-    // incluso con el panel minimizado.
-    function marcarCritico(chatId, nombre, razon) {
-        chatsCriticos.set(chatId, Date.now());
-        log(`🚨 CRÍTICO (${razon}): ${nombre} — necesita tu atención`, 'error');
+    // 🆕 v3.9.0: la alerta de crítico antes era pasiva — una fila roja en
+    // el panel que solo se nota si estás mirando el panel expandido. Ahora
+    // suena de inmediato y deja el botón flotante marcado (ver
+    // actualizarPanelEstado), así se nota incluso con el panel minimizado.
+    // sticky=true (NO TOCAR) no expira solo — ver estaCritico() arriba.
+    function marcarCritico(chatId, nombre, razon, sticky = false) {
+        chatsCriticos.set(chatId, { ts: Date.now(), sticky });
+        log(`🚨 CRÍTICO (${razon}): ${nombre} — necesita tu atención${sticky ? ' (no se reintenta solo)' : ''}`, 'error');
         playAlertSound();
     }
 
@@ -1858,7 +1869,7 @@
             // CHECK 3: Filtro NO TOCAR
             const razonNoTocar = esClienteNoTocar(mensaje);
             if (razonNoTocar) {
-                marcarCritico(chat.id, chat.nombre, razonNoTocar);
+                marcarCritico(chat.id, chat.nombre, razonNoTocar, true);
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
@@ -1967,16 +1978,18 @@
             const chatActivo = obtenerChatActivo(chats);
             const candidatos = buscarChatsElegibles(chats, chatActivo, MAX_CHATS_POR_TICK);
 
-            if (candidatos.length === 0) {
-                actualizarPanelEstado(chats, chatActivo);
-                return;
-            }
-
             // 🆕 v3.9.0: secuencial de nuevo — cada respuesta implica clickear
             // un chat de verdad, así que no se pueden procesar dos a la vez.
             for (const c of candidatos) {
                 await procesarChat(c);
             }
+
+            // 🐛 fix (auditoría v3.9.0): antes solo se refrescaba el panel
+            // (lista de chats, timers, indicador de crítico) cuando NO había
+            // nada para procesar en este tick. Con la cola llena, el panel
+            // quedaba desactualizado hasta el próximo tick ocioso — ahora
+            // siempre se refresca al final, haya procesado algo o no.
+            actualizarPanelEstado(chats, chatActivo);
         } finally {
             cicloEnCurso = false;
         }
@@ -2005,7 +2018,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.9.0</span>
+                    <span id="dt-title">🤖 DuTurbo v3.9.1</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2568,7 +2581,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.9.0 cargado (solo Modo Rápido, envío 100% visible)', 'success');
+        log('🚀 DuTurbo v3.9.1 cargado (solo Modo Rápido, envío 100% visible)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
