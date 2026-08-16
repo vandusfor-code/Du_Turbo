@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.9.2
-// @description  v3.9.2: Auditoria exhaustiva de todo el archivo (patrones, generacion de frases, regla de oro, lectura de chats, click-tracking, procesarChat, ciclo, panel, API debug) — sin bugs funcionales nuevos encontrados, motor confirmado solido. Limpieza: se saca agentJwt (se guardaba pero ya nadie lo lee desde que el envio volvio a ser por UI en v3.9.0) y se corrige el comentario de "API DIRECTA" que todavia describia el envio por API (ya es solo lectura). v3.9.1: chatsCriticos por NO TOCAR ahora es sticky (no expira solo a los 2 min, a diferencia de etapa critica/sin frase libre); ciclo() ahora refresca el panel siempre al final, no solo cuando no hay nada que procesar. v3.9.0: se elimina Modo Inteligente (IA) y Modo Gestion; el envio vuelve a ser 100% visible por UI real (abre el chat, escribe, manda, vuelve); la lectura sigue por la API directa de HeroCare; alerta sonora + indicador visual persistente cuando un chat queda critico.
+// @version      3.9.3
+// @description  v3.9.3: FIX critico de v3.9.0 — el chat activo (el que el agente tiene abierto) habia quedado excluido de la respuesta automatica por completo. La razon original (v3.8.2/3.8.3: HeroCare no refrescaba su vista cuando se respondia por API en silencio) ya no aplica desde que el envio volvio a ser 100% visible por UI real en v3.9.0 — asi que no hay motivo tecnico para seguir excluyendolo. Ahora se incluye igual que cualquier otro chat (sin badge, procesarChat decide por sort_id via API si hay algo nuevo), sin la complejidad del viejo Modo Gestion (sin botones, sin atajo, sin estado manual). Si el agente esta escribiendo un borrador en el chat activo, el bot no lo pisa. Optimizacion: si el chat a responder ya es el activo, no se lo clickea de nuevo (ahorra el click y 700ms de delay). v3.9.2: auditoria exhaustiva completa (sin bugs nuevos, limpieza de dato muerto agentJwt). v3.9.1: chatsCriticos por NO TOCAR ahora es sticky (no expira solo a los 2 min); ciclo() refresca el panel siempre al final. v3.9.0: se elimina Modo Inteligente (IA) y Modo Gestion; el envio vuelve a ser 100% visible por UI real; la lectura sigue por la API directa de HeroCare; alerta sonora + indicador visual persistente cuando un chat queda critico.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -1902,16 +1902,22 @@
             // Esto evita que otro ciclo procese el mismo chat mientras estamos enviando
             ultimaRespuestaChat.set(chat.id, Date.now());
 
-            // Abrir el chat (visible) y enviar por la UI real
-            botCambiandoChat = true;
-            const elChat = buscarElementoChat(chat.id);
-            if (!elChat) {
-                log(`❌ ${chat.nombre}: no encontré el chat en el sidebar para abrirlo`, 'error');
-                ultimaRespuestaChat.set(chat.id, Date.now() - CONFIG.cooldownChat - 1000);
-                return;
+            // Abrir el chat (visible) y enviar por la UI real. 🆕 v3.9.3: si
+            // ya es el chat activo (el agente lo tiene abierto), no hace
+            // falta clickearlo de nuevo — ya está mostrando la conversación
+            // correcta, así que se ahorra el click y el delay de cambio.
+            const yaEsElActivo = chatActivoActual && chatActivoActual.id === chat.id;
+            if (!yaEsElActivo) {
+                botCambiandoChat = true;
+                const elChat = buscarElementoChat(chat.id);
+                if (!elChat) {
+                    log(`❌ ${chat.nombre}: no encontré el chat en el sidebar para abrirlo`, 'error');
+                    ultimaRespuestaChat.set(chat.id, Date.now() - CONFIG.cooldownChat - 1000);
+                    return;
+                }
+                elChat.click();
+                await sleep(CONFIG.delayCambioDeChat);
             }
-            elChat.click();
-            await sleep(CONFIG.delayCambioDeChat);
 
             const ok = await enviarMensaje(frase);
             if (ok) {
@@ -1942,21 +1948,31 @@
     // ════════════════════════════════════════════════════════════
     // 🔁 CICLO PRINCIPAL
     // ════════════════════════════════════════════════════════════
-    // 🆕 v3.9.0: el chat activo (el que el agente tiene abierto en pantalla)
-    // NUNCA se procesa automáticamente — por pedido explícito, para que el
-    // agente siempre vea la respuesta en vivo al abrir/escribir, sin
-    // depender de que HeroCare refresque una vista tocada en segundo plano.
-    // Solo se procesan los demás chats, y solo si tienen badge de no-leído.
-    function buscarChatsElegibles(chats, chatActivo, maxCantidad) {
+    // 🆕 v3.9.3: el chat activo (el que el agente tiene abierto en pantalla)
+    // vuelve a incluirse. La razón original para excluirlo (v3.9.0) era que
+    // HeroCare no refrescaba su vista cuando el bot respondía por API en
+    // silencio — pero desde v3.9.0 el envío YA es 100% visible (click +
+    // escribir + Enviar reales) para todos los chats, así que esa razón dejó
+    // de existir: no hay ningún costo técnico en incluirlo. El chat activo no
+    // tiene badge de no-leído (ya está "visto"), así que se lo deja pasar
+    // siempre y procesarChat() decide si hay algo realmente nuevo (por
+    // sort_id, vía la API — no depende de leer el DOM). Los demás chats
+    // siguen requiriendo badge. Sin estado de activación/desactivación
+    // manual como el viejo Modo Gestión — es automático y uniforme.
+    function buscarChatsElegibles(chats, chatActivo, activoEscribiendo, maxCantidad) {
         const elegibles = [];
         for (const chat of chats) {
             if (elegibles.length >= maxCantidad) break;
 
             const esElActivo = chatActivo && (chat.id === chatActivo.id);
-            if (esElActivo) continue;
+
+            // Si el agente está escribiendo un borrador manual en el chat
+            // activo, no lo tratamos como candidato este tick — no queremos
+            // que el bot le gane de mano con una respuesta automática.
+            if (esElActivo && activoEscribiendo) continue;
 
             if (chatsBloqueados.has(chat.id)) continue;
-            if (!chat.tieneNuevos) continue;
+            if (!esElActivo && !chat.tieneNuevos) continue;
             if (estaDespedido(chat.id)) continue;
             if (tieneSolucion(chat.id)) continue;
             if (estaCritico(chat.id)) continue;
@@ -1969,8 +1985,7 @@
         return elegibles;
     }
 
-    // Máximo de chats en segundo plano a drenar en un mismo tick. El chat
-    // activo nunca cuenta acá (ver buscarChatsElegibles).
+    // Máximo de chats a drenar en un mismo tick (activo + segundo plano).
     const MAX_CHATS_POR_TICK = 5;
 
     async function ciclo() {
@@ -1980,8 +1995,14 @@
             const chats = leerChats();
             if (chats.length === 0) return;
 
+            let activoEscribiendo = false;
+            if (CONFIG.pausarSiAgenteEscribe) {
+                const taActivo = document.querySelector(SEL.textarea);
+                activoEscribiendo = !!(taActivo && taActivo.value && taActivo.value.trim().length > 0);
+            }
+
             const chatActivo = obtenerChatActivo(chats);
-            const candidatos = buscarChatsElegibles(chats, chatActivo, MAX_CHATS_POR_TICK);
+            const candidatos = buscarChatsElegibles(chats, chatActivo, activoEscribiendo, MAX_CHATS_POR_TICK);
 
             // 🆕 v3.9.0: secuencial de nuevo — cada respuesta implica clickear
             // un chat de verdad, así que no se pueden procesar dos a la vez.
@@ -2023,7 +2044,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.9.2</span>
+                    <span id="dt-title">🤖 DuTurbo v3.9.3</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2586,7 +2607,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.9.2 cargado (solo Modo Rápido, envío 100% visible)', 'success');
+        log('🚀 DuTurbo v3.9.3 cargado (chat activo también se responde solo)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
