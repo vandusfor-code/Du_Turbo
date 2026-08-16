@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.8.9
-// @description  v3.8.9: Modo Inteligente mejorado para sostener conversaciones largas (2+ min) con mas confianza: 1) ahora se le manda a Claude la transcripcion reciente completa (cliente y agente), no solo el ultimo mensaje aislado, para que responda coherente con el hilo real. 2) se agrego una red de seguridad deterministica del lado del codigo (no solo el prompt) que descarta cualquier respuesta de la IA que mencione montos, plazos concretos, cupones o verbos de promesa — si eso pasa, se usa Modo Rapido (plantillas fijas, sin riesgo) en su lugar. v3.8.8: FIX — chatsCriticos (el estado que hace que el bot deje de responder un chat) nunca expiraba, a diferencia de despedido/solucion que si tenian vencimiento de 15 min. Una vez marcado critico por cualquier motivo (incluida una falla transitoria de la IA o quedarse sin frase libre de repeticion por un momento), el chat quedaba abandonado para siempre hasta resetearlo a mano. Ahora expira a los 2 minutos y el bot vuelve a intentar solo. v3.8.7: El bot escalaba a "critico" (dejaba de responder) despues de solo 5 respuestas en el mismo chat, pensado para no abandonar un chat pero que rompia el proposito real del bot: sostener al cliente mientras el agente gestiona varios chats a la vez, aunque mande 7+ mensajes seguidos. El umbral (CONFIG.umbralCritico, que existia pero estaba desconectado) ahora es 20, bien por encima del uso real, dejando que la razon real para escalar sea quedarse sin frase libre de repeticion (regla de oro) en vez de un conteo arbitrario. v3.8.6: SLA bajado de 20s a 10s por mensaje. ciclo() ahora procesa TODOS los chats elegibles del tick EN PARALELO (Promise.all) en vez de uno por uno — sin la restriccion de "una sola pantalla abierta" (ya no aplica, todo es API) no hay motivo para poner un chat a esperar a que termine otro. Se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el nuevo tope. v3.8.5: FIX CRITICO de la regla de oro — Modo Inteligente (Claude) nunca registraba sus propias palabras en el sistema anti-repeticion (solo en una lista aparte usada nada mas para el prompt), asi que el chequeo quedaba ciego a todo lo que la IA ya habia dicho y podia repetir la misma frase sin ser detectado. Ademas, ahora cada procesamiento re-sincroniza la regla de oro contra el historial REAL de la API (no solo la memoria del script), para que se autocorrija sola ante cualquier otro hueco futuro. v3.8.4: Nuevo boton 📌 en el header del panel — abre un widget aparte, chiquito y movible por toda la pantalla, que muestra SOLO el mini-transcript del chat activo (sin el panel completo tapando la pantalla). El boton flotante sigue funcionando igual (abre el panel completo y oculta el widget mini). Se recuerda la posicion y si estaba activo entre recargas. v3.8.3: El experimento de v3.8.2 (disparar focus/visibilitychange) no funciono — HeroCare confirmado que no refresca sola la vista del chat activo cuando se responde por API. En vez de depender de eso, se agrega un mini-transcript dentro del PANEL de DuTurbo (no en el chat de HeroCare) que muestra los ultimos mensajes del chat activo, incluido lo que el bot acaba de enviar — 100% confiable porque lo pinta el propio script con datos que ya tiene, sin esperar a que la otra app refresque nada. v3.8.2: Experimental — cuando se le responde por API al chat que el agente tiene abierto en pantalla, HeroCare no refresca la vista sola (el mensaje queda invisible hasta recargar F5, aunque ya se guardo bien del lado del servidor). Se agrega un intento de mejor esfuerzo (dispara eventos focus/visibilitychange, sin clickear ni navegar nada) para ver si eso empuja a la app a refrescar sola; no hay garantia de que funcione. v3.8.1: Fix critico — las llamadas a la API nueva llevaban credentials:'include' (para mandar cookies), pero esta API no usa cookies (solo Bearer token) y responde con Access-Control-Allow-Origin:'*'. El navegador prohibe esa combinacion y bloqueaba el fetch por CORS silenciosamente ("Failed to fetch") antes de llegar al servidor. Se saca credentials:'include' de las 3 llamadas (room/history/send-message). v3.8.0: Motor reescrito para responder SIN abrir el chat — antes, procesar un chat en segundo plano requería clickearlo (interrumpiendo visualmente al agente), leer el DOM de la conversación y escribir en el textarea. Ahora habla directo con la API interna de HeroCare descubierta por Network tab (GET /tickets/{id}/room, GET /rooms/{id}/history, POST /rooms/send-message): lee y responde cualquier chat sin tocar la pantalla. El Authorization Bearer se captura en caliente interceptando el fetch/XHR de la propia app, nunca se hardcodea. v3.7.1: SLA de respuesta — ciclo() procesaba UN chat por tick (1.5s) aunque hubiera varios esperando a la vez, lo que podia acumular mas de 20s para los ultimos de la fila. Ahora drena todo el backlog elegible en el mismo tick (releyendo el DOM entre cada uno) y se bajaron intervalo/cooldowns/timeoutIA para dejar margen real bajo el limite de 20s por mensaje. v3.7.0: Regla de oro reforzada — antes el anti-repeticion solo rastreaba ~50 palabras de una lista fija y, si se agotaban las frases sin repetir, el codigo caia en un fallback que repetia igual (en Modo Rapido y sin ningun chequeo real en Modo Inteligente). Ahora se rastrea cualquier palabra de contenido, nunca se fuerza una repeticion, hay rescate cruzado Rapido/IA, y si de verdad no queda ninguna frase libre se escala al agente humano en vez de repetir. v3.6.3: Fix — el bot saltaba a otros chats con badge en loop (sin que el cliente escribiera nada) porque un fallo de lectura de mensaje no marcaba cooldown; y podia interrumpir al agente mientras escribia manualmente en el chat activo. v3.6.2: Fix critico — el id de cada chat se derivaba del nombre + texto del sidebar, que incluye un countdown que tickea cada segundo. Eso hacia que el bot perdiera el chat activo constantemente. Ahora usa el data-testid="ticket-{uuid}" real del <li> como id estable. v3.6.1: backendURL apunta al deploy real en Vercel.
+// @version      3.9.0
+// @description  v3.9.0: Cambio grande por pedido explicito — se elimina el Modo Inteligente (IA) por completo, queda solo Modo Rapido (plantillas/regex), mas liviano. Se elimina Modo Gestion: el chat que el agente tiene abierto ya NO se responde automaticamente (evita el problema de HeroCare no refrescar solo la vista cuando se respondia por API en el chat activo); el agente siempre ve la respuesta en vivo. El envio vuelve a ser 100% visible: se abre el chat (click), se escribe y se manda por la UI real, y se vuelve al chat donde estaba el agente — igual que las versiones anteriores a v3.8.0. La LECTURA de mensajes se mantiene por la API directa de HeroCare (mas confiable que leer el DOM), solo el ENVIO volvio a ser por UI. Se agrega alerta sonora inmediata + indicador visual persistente en el boton flotante (incluso minimizado) cuando un chat queda critico (filtro NO TOCAR), para que sea imposible no notarlo.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -18,24 +18,17 @@
     // ⚙️ CONFIGURACIÓN
     // ════════════════════════════════════════════════════════════
     const CONFIG = {
-        // 🆕 v3.8.6: SLA de máx. 10s por mensaje (antes 20s). Se ajustan
-        // intervalo/cooldowns/timeoutIA para dejar margen real bajo ese tope,
-        // y ciclo() ahora procesa todos los chats elegibles de un tick EN
-        // PARALELO (ver Promise.all en ciclo) en vez de uno por uno.
-        intervalo: 800,
-        cooldownChat: 3500,
-        delayAntesDeEnviar: 500, // 🆕 v3.8.0: solo lo usa el botón manual de "pegar template"
+        // 🆕 v3.9.0: vuelve al ritmo del modelo click-based (envío visible
+        // por UI real). Los tiempos agresivos de v3.8.x eran solo válidos
+        // cuando el envío era 100% por API sin tocar la pantalla.
+        intervalo: 1500,
+        cooldownChat: 8000,
+        delayAntesDeEnviar: 500,
+        delayCambioDeChat: 700, // 🆕 v3.9.0: restaurado — tiempo para que HeroCare renderice el chat tras clickearlo
         pausarSiAgenteEscribe: true,
         debug: true,
         activoInicio: false,
         nombreAgente: '',
-
-        // 🤖 Modo Inteligente — vía backend propio (Claude Haiku 4.5)
-        // La API key vive en el servidor (variable de entorno), nunca en este archivo.
-        backendURL: 'https://du-turbo-backend.vercel.app/api/generar-respuesta',
-
-        modoIA: 'rapido',
-        timeoutIA: 1500,
 
         // Personalización
         maxUsosNombrePorChat: 2,
@@ -52,11 +45,11 @@
     // ════════════════════════════════════════════════════════════
     // 🎯 SELECTORES DOM
     // ════════════════════════════════════════════════════════════
-    // 🆕 v3.8.0: conversationContainer/chatBubble/dividerNew ya no se usan —
-    // leer/enviar mensajes ahora pasa por la API interna de HeroCare (ver
-    // sección "API DIRECTA"), no por scrapear el DOM de la conversación
-    // abierta. textarea se conserva para el botón manual de "pegar template"
-    // y para el chequeo de "el agente está escribiendo".
+    // 🆕 v3.9.0: LEER mensajes sigue por la API interna de HeroCare (ver
+    // sección "API DIRECTA" — más confiable que scrapear el DOM). ENVIAR
+    // vuelve a ser por la UI real: se clickea el chat y se escribe en
+    // textarea (ver enviarMensaje/procesarChat), por eso conversationContainer/
+    // chatBubble/dividerNew ya no hacen falta pero textarea sí.
     const SEL = {
         chatItem: '.ant-list-item',
         unreadBadge: '.ant-scroll-number-only-unit.current',
@@ -242,38 +235,6 @@
             .sort((a, b) => a.sortId - b.sortId);
     }
 
-    async function apiEnviarMensaje(room, texto) {
-        if (!authCapturado) {
-            log('❌ Sin token de sesión capturado todavía — no puedo enviar por API', 'error');
-            return false;
-        }
-        const body = {
-            access: '*',
-            content: texto,
-            identityId: identityIdEfectivo(),
-            message_id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            roomId: room.id,
-            token: room.agentJwt,
-            type: 'text',
-            username: usernameEfectivo()
-        };
-        try {
-            const resp = await fetch(`${API_BASE}/rooms/send-message`, {
-                method: 'POST',
-                headers: { 'Authorization': authCapturado, 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-            if (!resp.ok && (resp.status === 401 || resp.status === 403)) {
-                // el agentJwt de este room puede haber expirado — se refresca solo la próxima vez
-                roomInfoPorTicket.delete(room.ticketId);
-            }
-            return resp.ok;
-        } catch (e) {
-            log(`⚠️ Error enviando mensaje por API: ${e.message}`, 'error');
-            return false;
-        }
-    }
-
     // ════════════════════════════════════════════════════════════
     // 🚨 FILTRO DE SEGURIDAD — Cliente "NO TOCAR"
     // ════════════════════════════════════════════════════════════
@@ -456,27 +417,6 @@
         /a tu billetera pedidosya/i,                      // 🆕
         /quedó anulado el cobro/i,                        // 🆕
     ];
-
-    // 🆕 v3.8.9: RED DE SEGURIDAD DETERMINÍSTICA para Modo Inteligente.
-    // El SYSTEM_PROMPT ya le pide a Claude que nunca dé montos/plazos/
-    // promesas concretas, pero eso es una instrucción "blanda" — un LLM
-    // puede desviarse. Este chequeo de código SÍ es determinístico: si la
-    // respuesta de la IA cae en cualquiera de estos patrones, se descarta
-    // (fallback a Modo Rápido, que son plantillas fijas sin riesgo de esto).
-    const PATRONES_PROHIBIDOS_IA = [
-        /\$\s?\d/,                                          // montos con $
-        /\bARS\s?\d/i,                                      // montos en ARS
-        /\b\d+\s?(minutos?|horas?|d[ií]as?|semanas?)\b/i,    // plazos concretos
-        /\b(ma[ñn]ana|hoy mismo|en breve|enseguida)\b/i,     // promesas de tiempo
-        /\b(reembols\w*|acredit\w*|reintegr\w*)\b/i,         // solución/reembolso concreto
-        /\b(realizar[ée]|env[ií]ar[ée]|proceder[ée]|escalar[ée])\b/i, // promesas de acción
-        /cup[oó]n/i,
-        /n[uú]mero de orden/i,
-    ];
-
-    function respuestaIAViolaReglas(texto) {
-        return PATRONES_PROHIBIDOS_IA.some(rx => rx.test(texto));
-    }
 
     // 🆕 v3.8.0: recibe el historial ya clasificado (ver clasificarMensajesHistorial)
     // en vez de scrapear el DOM de la conversación abierta.
@@ -1287,13 +1227,9 @@
     const chatsConSolucion = new Map();
     const chatsCriticos = new Map();
     const imagenesPorChat = new Map();    // 🆕 v3.2.1: rastrea cuántas imágenes envió el cliente
-    const chatsEnModoGestion = new Map(); // 🆕 v3.2.2: chats donde el bot ayuda activamente { chatId: timestamp }
-    const chatsGestionDesactivadaManual = new Set(); // 🆕 v3.5.6: chats donde el usuario desactivó manualmente
-    const ultimoSortIdProcesado = new Map(); // 🆕 v3.8.0: último sort_id (API) ya respondido/visto por chat (antes: texto de la última burbuja)
+    const ultimoSortIdProcesado = new Map(); // 🆕 v3.8.0: último sort_id (API) ya respondido/visto por chat
     const chatsBloqueados = new Set(); // 🆕 v3.4.2: chats que están siendo procesados ahora mismo (lock estricto)
     const EXPIRACION_DESPEDIDA = 15 * 60 * 1000;
-    const TIMEOUT_MODO_GESTION = 60 * 60 * 1000;  // 🆕 v3.5.6: 60 min (antes 5 min)
-    const COOLDOWN_MODO_GESTION = 4000;           // 🆕 v3.8.6: 4s (antes 6s) — deja margen real bajo el SLA de 10s
 
     // 🆕 v3.5.6: Timer por chat + sonido de alerta
     const tiempoInicioPorChat = new Map();
@@ -1309,6 +1245,7 @@
     const REGEX_IMAGEN = /https?:\/\/helpcenter-us\.usehurrier\.com\/files-api\/files\//i;
 
     let chatActivoActual = null;
+    let botCambiandoChat = false; // 🆕 v3.9.0: restaurado — evita que el listener de clicks confunda los clicks del propio bot con los del agente
 
     // ════════════════════════════════════════════════════════════
     // 🛠 UTILS
@@ -1375,17 +1312,6 @@
     }
 
     // ════════════════════════════════════════════════════════════
-    // 👁️ MODO GESTIÓN (NUEVO v3.2.2)
-    // El bot ayuda al agente respondiendo en el chat ACTIVO también,
-    // mientras el agente está gestionando una devolución/cupón.
-    // Se desactiva automáticamente cuando:
-    // - Agente da solución (cupón/devolución)
-    // - Agente se despide
-    // - Agente cambia a otro chat activo
-    // - Pasan TIMEOUT_MODO_GESTION sin mensajes del cliente
-    // - Click manual en el botón
-    // ════════════════════════════════════════════════════════════
-    // ════════════════════════════════════════════════════════════
     // 🆕 v3.5.6: SONIDO Y TIMER POR CHAT
     // ════════════════════════════════════════════════════════════
     function playAlertSound() {
@@ -1421,47 +1347,6 @@
     function formatearTimer(ms) {
         const seg = Math.floor(ms / 1000);
         return `${Math.floor(seg / 60)}:${(seg % 60).toString().padStart(2, '0')}`;
-    }
-
-    function activarModoGestion(chatId, nombre) {
-        chatsEnModoGestion.set(chatId, Date.now());
-        log(`👁️ Modo Gestión ACTIVADO: ${nombre}`, 'success');
-    }
-
-    function desactivarModoGestion(chatId, motivo = 'manual') {
-        if (!chatsEnModoGestion.has(chatId)) return;
-        chatsEnModoGestion.delete(chatId);
-        // 🆕 v3.5.6: NO borrar ultimoSortIdProcesado
-        // para que al volver al chat, el bot recuerde qué ya respondió
-        log(`🛑 Modo Gestión desactivado (${motivo}): ${chatId}`, 'warn');
-    }
-
-    function estaEnModoGestion(chatId) {
-        const ts = chatsEnModoGestion.get(chatId);
-        if (!ts) return false;
-        // Timeout automático: sin actividad por TIMEOUT_MODO_GESTION (60 min)
-        if (Date.now() - ts > TIMEOUT_MODO_GESTION) {
-            desactivarModoGestion(chatId, 'timeout 60min');
-            return false;
-        }
-        return true;
-    }
-
-    function refrescarModoGestion(chatId) {
-        // Renueva el timestamp para que no expire mientras hay actividad
-        if (chatsEnModoGestion.has(chatId)) {
-            chatsEnModoGestion.set(chatId, Date.now());
-        }
-    }
-
-    function toggleModoGestion(chatId, nombre) {
-        if (estaEnModoGestion(chatId)) {
-            desactivarModoGestion(chatId, 'manual');
-            chatsGestionDesactivadaManual.add(chatId);  // 🆕 v3.5.6: marcar como desactivado manual
-        } else {
-            activarModoGestion(chatId, nombre);
-            chatsGestionDesactivadaManual.delete(chatId);  // 🆕 v3.5.6: quitar marca si reactiva
-        }
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1551,167 +1436,6 @@
     }
 
     // ════════════════════════════════════════════════════════════
-    // 🧠 PROMPT PARA MODO INTELIGENTE (usado por el backend, Claude Haiku 4.5)
-    // 🆕 v3.6.0: Ya no se usa directamente en este archivo — la llamada al
-    // modelo ahora vive en backend/server.js. Se conserva aquí como
-    // referencia para cuando construyamos ese endpoint en el siguiente paso.
-    // ════════════════════════════════════════════════════════════
-    const SYSTEM_PROMPT = `Eres un asistente que SOLO compra tiempo en chats de atención al cliente de PedidosYa.
-NO eres agente. NO resuelves nada. NO prometes nada.
-Tu única tarea: mantener al cliente atendido mientras el agente humano está ocupado en otro chat.
-
-REGLAS ESTRICTAS:
-1. Respuestas MÁXIMO 12 palabras
-2. NUNCA prometas acciones ("devolveré", "escalaré", "enviaré cupón", "realizaré", "verificaré con")
-3. NUNCA des información específica (montos, plazos, productos, números de orden)
-4. SOLO frases de espera, reconocimiento, paciencia, empatía
-5. Si el cliente exige solución concreta, escalamiento, está furioso, pregunta algo técnico, o pide reposición/cambio → responde EXACTAMENTE: {ESCALAR}
-
-VOCABULARIO PROHIBIDO:
-- "Te leo"
-- "Anotado" (suena indiferente)
-- "Uy", "Qué mal", "Caray", "Vaya"
-- "Entiendo lo frustrante"
-- "Comprendo cuán"
-- "Lo siento profundamente"
-- "Escalaré", "Ya realicé", "Te enviaré"
-- Promesas con plazos ("en 5 minutos", "en breve")
-
-EJEMPLOS DE RESPUESTAS CORRECTAS (calcadas de agentes top reales):
-Cliente: "me llegó la comida fría" → "Lamento mucho lo sucedido. Permíteme verificar tu caso."
-Cliente: "ok" → "Perfecto, sigo gestionando."
-Cliente: "gracias" → "Con gusto, sigo con tu caso."
-Cliente: "todavía estás?" → "Aquí sigo, ya casi termino."
-Cliente: "es que estaba con mis hijos" → "Comprendo, sigo revisando."
-Cliente: "cuánto demoras?" → "Ya casi termino la revisión."
-Cliente: "mira lo que me llegó" → "Comprendo, lo estoy revisando con atención."
-Cliente: "no es la primera vez que pasa" → "Lo lamento mucho. Sigo trabajando en tu caso."
-Cliente: "me cobraron de más" → "Comprendo, sigo revisando los detalles."
-
-CASOS QUE DEVUELVEN {ESCALAR}:
-Cliente: "quiero hablar con un supervisor" → {ESCALAR}
-Cliente: "esto es una estafa" → {ESCALAR}
-Cliente: "necesito que me envíen otro" → {ESCALAR}
-Cliente: "no me sirve esa solución" → {ESCALAR}
-Cliente: "voy a denunciar" → {ESCALAR}
-Cliente: "Rappi me trata mejor" → {ESCALAR}
-Cliente: "cuánto me devuelven exactamente?" → {ESCALAR}
-
-CONTEXTO QUE RECIBES:
-- Etapa del chat (1=apertura, 2=escucha, 3=tranquiliza)
-- Si el agente ya escribió mensajes previos REALES (no protocolarios)
-- Respuestas previas del bot (NO REPITAS)
-- La CONVERSACIÓN RECIENTE completa (últimos turnos, cliente y vos) — leela
-  para responder con contexto real, no como si fuera el primer mensaje
-- El último mensaje del cliente (a ese es al que tenés que responder)
-
-INSTRUCCIÓN POR ETAPA:
-- Etapa 1: empatía corta + pedir espera
-- Etapa 2: acuse cálido en 2 partes (reconocimiento + acción), NO repitas "espera"
-- Etapa 3: muestra que ya casi terminas
-
-Si el agente YA escribió mensajes reales (no solo saludos), NUNCA respondas con apertura empática.
-Usa siempre respuesta de etapa 2 o 3.
-
-RECORDATORIO FINAL (esto se verifica automáticamente, no lo ignores):
-NUNCA incluyas montos, plazos concretos ("mañana", "en 10 minutos"), cupones,
-ni verbos de promesa ("realizaré", "enviaré", "acreditaré") — si tu respuesta
-tiene algo de esto, se descarta entera y no llega al cliente.
-
-Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
-
-    // ════════════════════════════════════════════════════════════
-    // 🧠 GENERAR RESPUESTA — MODO INTELIGENTE (Claude Haiku 4.5 vía backend)
-    // 🆕 v3.6.0: Ya no se llama a OpenAI directo desde el navegador (la key
-    // ya no vive en este archivo). Se hace fetch al backend propio, que es
-    // el único que conoce la API key de Claude (como variable de entorno
-    // del servidor) y arma el prompt. backend/server.js aún no existe —
-    // esta URL es un placeholder hasta el siguiente paso.
-    // ════════════════════════════════════════════════════════════
-    async function generarRespuestaIA(mensaje, etapa, chatId, nombreCliente, historial) {
-        const recientes = frasesEnviadasPorChat.get(chatId) || [];
-        // 🆕 v3.7.0: además de las últimas 5 frases, mandamos TODAS las
-        // palabras significativas ya usadas en el chat, para que el backend
-        // le pida al modelo que las evite (antes solo veía las últimas 5
-        // frases, así que en chats largos podía repetir palabras viejas).
-        const palabrasUsadas = Array.from(palabrasUsadasPorChat.get(chatId) || []);
-
-        // 🆕 v3.8.9: antes la IA solo veía el ÚLTIMO mensaje del cliente
-        // aislado — sin ver el ida y vuelta real, podía sonar incoherente
-        // en chats largos (2+ minutos, varios turnos). Ahora se manda la
-        // transcripción reciente completa (cliente Y agente) para que
-        // responda con contexto real, no a ciegas.
-        const transcript = (historial || []).slice(-8).map(m => ({
-            quien: m.esAgente ? 'agente' : 'cliente',
-            texto: m.esAgente ? m.texto : limpiarTextoBurbuja(m.texto, nombreCliente)
-        }));
-
-        try {
-            const ctrl = new AbortController();
-            const timeoutId = setTimeout(() => ctrl.abort(), CONFIG.timeoutIA);
-
-            const resp = await fetch(CONFIG.backendURL, {
-                method: 'POST',
-                signal: ctrl.signal,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    mensaje,
-                    etapa,
-                    frasesEnviadas: recientes,
-                    palabrasUsadas,
-                    transcript
-                })
-            });
-
-            clearTimeout(timeoutId);
-
-            if (!resp.ok) {
-                log(`⚠️ Backend IA error ${resp.status}, fallback rápido`, 'warn');
-                return null;
-            }
-
-            const data = await resp.json();
-            const texto = (data?.respuesta || '').trim();
-
-            if (!texto) return null;
-
-            if (texto.includes('{ESCALAR}')) {
-                log('🚨 Backend IA solicitó ESCALAR — no envío', 'warn');
-                return '{ESCALAR}';
-            }
-
-            if (texto.length > 120) {
-                log('⚠️ Respuesta IA muy larga, fallback rápido', 'warn');
-                return null;
-            }
-
-            // 🆕 v3.8.9: red de seguridad determinística — si a pesar del
-            // prompt la IA se desvió y prometió algo concreto (monto, plazo,
-            // cupón, acción), se descarta acá mismo. Esto es lo que te da la
-            // garantía real, no solo confiar en que el modelo obedezca.
-            if (respuestaIAViolaReglas(texto)) {
-                log('🚫 Respuesta IA violó reglas (monto/plazo/promesa) — descartada', 'warn');
-                return null;
-            }
-
-            // 🆕 v3.7.0: regla de oro — verificación dura del lado del cliente.
-            // El prompt le pide a la IA que no repita, pero es una instrucción
-            // blanda; si igual repite una palabra ya usada en este chat, se
-            // descarta acá (el llamador decide cómo rescatar esto).
-            if (fraseTieneRepeticion(chatId, texto)) {
-                log('🔁 Respuesta IA repite palabra ya usada en el chat — descartada', 'warn');
-                return null;
-            }
-
-            registrarFraseEnviada(chatId, texto);
-            return texto;
-        } catch (err) {
-            log(`⚠️ Backend IA excepción: ${err.message}, fallback`, 'warn');
-            return null;
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════
     // 🎯 GENERAR RESPUESTA (dispatcher)
     // PRIORIDAD: imagen primera vez > saludo espejeado > generación normal
     // ════════════════════════════════════════════════════════════
@@ -1781,40 +1505,14 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             return respuestaDevolucion;
         }
 
-        // 🆕 v3.7.0: dispatcher con rescate cruzado. Rápido e Inteligente ahora
-        // devuelven null cuando no encuentran una frase libre de repetición
-        // (regla de oro). Si el modo preferido no encuentra nada, se prueba
-        // el otro modo como rescate antes de escalar de verdad.
-        let frase;
-        if (CONFIG.modoIA === 'inteligente') {
-            frase = await generarRespuestaIA(mensaje, etapa, chatId, nombreCliente, historial);
-            if (frase === '{ESCALAR}') return null;
-            if (!frase) {
-                log('🔁 IA sin frase válida — pruebo Modo Rápido como rescate', 'warn');
-                frase = generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente, historial);
-            }
-        } else {
-            frase = generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente, historial);
-            if (!frase) {
-                log('🔁 Modo Rápido agotó frases sin repetir — pruebo IA como rescate', 'warn');
-                const rescate = await generarRespuestaIA(mensaje, etapa, chatId, nombreCliente, historial);
-                if (rescate === '{ESCALAR}') return null;
-                frase = rescate;
-            }
-        }
+        // 🆕 v3.9.0: sin IA — solo Modo Rápido. Si se quedó sin frase libre
+        // de repetición (regla de oro), se escala al agente en vez de repetir.
+        let frase = generarRespuestaRapida(mensaje, etapa, chatId, nombreCliente, historial);
 
         if (!frase) {
             log('🚨 Sin frase libre de repetición (regla de oro) — escalar', 'warn');
             return null;
         }
-
-        // 🆕 v3.8.5: FIX CRÍTICO — generarRespuestaIA() nunca registraba sus
-        // palabras acá (solo en frasesEnviadasPorChat, una lista aparte que
-        // solo se usa para el prompt). Eso dejaba ciego al chequeo de
-        // "regla de oro" ante TODO lo que la IA ya había dicho, así que
-        // Modo Inteligente podía repetir la misma frase sin ser detectado.
-        // Para el camino Rápido esto ya se hacía adentro (llamada idempotente).
-        registrarPalabrasUsadas(chatId, frase);
 
         frase = personalizarFrase(frase, nombreCliente, chatId);
         return frase;
@@ -1885,8 +1583,10 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     // ════════════════════════════════════════════════════════════
     function inicializarTrackingClicks() {
         document.addEventListener('click', (e) => {
-            // 🆕 v3.8.0: el bot ya no clickea chats (procesa todo por API),
-            // así que este listener ya no necesita distinguir sus propios clicks.
+            // 🆕 v3.9.0: restaurado — ignora los clicks que hace el propio bot
+            // al abrir un chat para responder (ver procesarChat/volverAChat).
+            if (botCambiandoChat) return;
+
             const item = e.target.closest(SEL.chatItem);
             if (!item) return;
 
@@ -1896,37 +1596,9 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             const nombre = extraerNombreCliente(item);
             if (!id || !nombre) return;
 
-            // 🆕 v3.2.2: Si cambiamos a otro chat → desactivar Modo Gestión del anterior
-            if (chatActivoActual && chatActivoActual.id !== id) {
-                desactivarModoGestion(chatActivoActual.id, 'cambio de chat activo');
-            }
-
             chatActivoActual = { id, nombre };
             resetChatLigero(id, nombre);
-
-            // 🆕 v3.8.3: limpiar el preview de inmediato (antes de que llegue
-            // el fetch) para no mostrar la transcripción del chat anterior.
-            renderPreviewChatActivo(id, nombre, []);
-
-            const activarGestion = !chatsGestionDesactivadaManual.has(id);
-            if (activarGestion) activarModoGestion(id, nombre);
-
-            // 🆕 v3.8.0: Capturar el sort_id del último mensaje (vía API, ya
-            // no hace falta esperar a que renderice el DOM) como "ya visto"
-            // para NO re-responder algo viejo al abrir el chat. De paso,
-            // 🆕 v3.8.3: pintar el mini-transcript del panel con lo real.
-            (async () => {
-                const room = await obtenerRoomInfo(id);
-                if (!room) return;
-                const crudos = await obtenerHistorialCrudo(room);
-                if (!crudos) return;
-                const historial = clasificarMensajesHistorial(crudos, room.name);
-                renderPreviewChatActivo(id, nombre, historial);
-                const ultimo = historial[historial.length - 1];
-                if (activarGestion && ultimo) ultimoSortIdProcesado.set(id, ultimo.sortId);
-            })();
-
-            log(`👤 Chat activo: ${nombre}${chatsGestionDesactivadaManual.has(id) ? ' (manual OFF)' : ' (ayuda activada)'}`, 'info');
+            log(`👤 Chat activo: ${nombre}`, 'info');
         }, true);
     }
 
@@ -2037,11 +1709,23 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         return true;
     }
 
+    // 🆕 v3.9.0: la alerta de crítico (NO TOCAR, etapa crítica, sin frase
+    // libre) antes era pasiva — una fila roja en el panel que solo se nota
+    // si estás mirando el panel expandido. Ahora suena de inmediato y deja
+    // el botón flotante marcado (ver actualizarPanelEstado), así se nota
+    // incluso con el panel minimizado.
+    function marcarCritico(chatId, nombre, razon) {
+        chatsCriticos.set(chatId, Date.now());
+        log(`🚨 CRÍTICO (${razon}): ${nombre} — necesita tu atención`, 'error');
+        playAlertSound();
+    }
+
     // ════════════════════════════════════════════════════════════
-    // ✉️ ENVIAR MENSAJE A HEROCARE — SOLO para el botón manual "pegar
-    // template" (dt-tpl-btn), que escribe en el chat que el agente ya
-    // tiene abierto en pantalla. El procesamiento automático en segundo
-    // plano usa apiEnviarMensaje() (ver "API DIRECTA"), no esta función.
+    // ✉️ ENVIAR MENSAJE A HEROCARE — escribe en el textarea real y aprieta
+    // Enviar. La usan tanto el botón manual de "pegar template" como
+    // procesarChat() (ver abajo) para el chat que ya está abierto/clickeado
+    // en pantalla — así HeroCare siempre refresca solo, es una acción real
+    // de UI, no una llamada silenciosa por API.
     // ════════════════════════════════════════════════════════════
     async function enviarMensaje(texto) {
         const ta = document.querySelector(SEL.textarea);
@@ -2072,16 +1756,43 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         return true;
     }
 
+    // Busca en vivo el <li> del sidebar por ticket-id (nunca reutiliza una
+    // referencia vieja capturada al principio del tick — evita clickear un
+    // nodo que ya no es el correcto si el DOM se reordenó mientras tanto).
+    function buscarElementoChat(id) {
+        const items = document.querySelectorAll(SEL.chatItem);
+        for (const item of items) {
+            if (extraerIdTicket(item) === id) return item;
+        }
+        return null;
+    }
+
+    // 🆕 v3.9.0: restaurado — después de responder un chat en segundo plano,
+    // vuelve a clickear el chat que el agente tenía abierto antes.
+    async function volverAChat(chatPrevio, chatActual) {
+        if (!chatPrevio || chatPrevio.id === chatActual.id) return;
+        await sleep(400);
+        const el = buscarElementoChat(chatPrevio.id);
+        if (el) {
+            el.click();
+            log(`↩️ Volviendo a ${chatPrevio.nombre}`, 'info');
+        }
+    }
+
     // ════════════════════════════════════════════════════════════
     // ⚙️ PROCESAR UN CHAT
-    // 🆕 v3.8.0: ya no clickea el chat ni lee/escribe el DOM — todo pasa
-    // por la API directa de HeroCare (obtenerRoomInfo/obtenerHistorialCrudo/
-    // apiEnviarMensaje), así el agente nunca ve el chat "saltar" mientras
-    // el bot responde en segundo plano.
+    // 🆕 v3.9.0: la LECTURA sigue por la API directa de HeroCare (más
+    // confiable que scrapear el DOM: identity_id del servidor en vez de
+    // heurísticas de color/estructura). El ENVÍO vuelve a ser 100% visible
+    // por UI real — abre el chat (click), escribe y manda por el botón
+    // Enviar, y vuelve al chat donde estaba el agente. Esto es lo que hace
+    // que HeroCare refresque solo (a diferencia de mandar por API en
+    // silencio, que dejaba el mensaje "invisible" hasta F5).
     // ════════════════════════════════════════════════════════════
     async function procesarChat(chat) {
         if (chatsBloqueados.has(chat.id)) return;
         chatsBloqueados.add(chat.id);
+        const chatPrevio = chatActivoActual; // snapshot para volver después
 
         try {
             const room = await obtenerRoomInfo(chat.id);
@@ -2122,7 +1833,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // CHECK 1: ¿Ya se despidió?
             if (agenteYaSeDespidio(historial)) {
                 marcarDespedido(chat.id);
-                desactivarModoGestion(chat.id, 'agente se despidió');  // 🆕 v3.2.2
                 log(`🚫 ${chat.nombre}: ya despedido`, 'warn');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
@@ -2131,7 +1841,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // CHECK 2: ¿Ya hay solución entregada?
             if (agenteYaDioSolucion(historial)) {
                 marcarConSolucion(chat.id);
-                desactivarModoGestion(chat.id, 'solución entregada');  // 🆕 v3.2.2
                 log(`💰 ${chat.nombre}: ya hay solución — no respondo`, 'warn');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
@@ -2149,8 +1858,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // CHECK 3: Filtro NO TOCAR
             const razonNoTocar = esClienteNoTocar(mensaje);
             if (razonNoTocar) {
-                log(`🚨 CLIENTE NO TOCAR (${razonNoTocar}) — alerta`, 'error');
-                chatsCriticos.set(chat.id, Date.now());
+                marcarCritico(chat.id, chat.nombre, razonNoTocar);
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
@@ -2161,8 +1869,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
 
             // CHECK 4: ¿Etapa crítica?
             if (etapa === 4) {
-                log(`🔴 ${chat.nombre}: CRÍTICO — alerta`, 'error');
-                chatsCriticos.set(chat.id, Date.now());
+                marcarCritico(chat.id, chat.nombre, 'etapa crítica');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
@@ -2170,8 +1877,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // Generar respuesta (saludos espejeados tienen prioridad)
             const frase = await generarRespuesta(mensaje, etapa, chat.id, chat.nombre, historial);
             if (!frase) {
-                log(`🚨 Respuesta vetada (escalar)`, 'warn');
-                chatsCriticos.set(chat.id, Date.now());
+                marcarCritico(chat.id, chat.nombre, 'sin frase libre de repetición');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 return;
             }
@@ -2180,30 +1886,30 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // Esto evita que otro ciclo procese el mismo chat mientras estamos enviando
             ultimaRespuestaChat.set(chat.id, Date.now());
 
-            // Enviar (por API, sin abrir el chat)
-            const ok = await apiEnviarMensaje(room, frase);
+            // Abrir el chat (visible) y enviar por la UI real
+            botCambiandoChat = true;
+            const elChat = buscarElementoChat(chat.id);
+            if (!elChat) {
+                log(`❌ ${chat.nombre}: no encontré el chat en el sidebar para abrirlo`, 'error');
+                ultimaRespuestaChat.set(chat.id, Date.now() - CONFIG.cooldownChat - 1000);
+                return;
+            }
+            elChat.click();
+            await sleep(CONFIG.delayCambioDeChat);
+
+            const ok = await enviarMensaje(frase);
             if (ok) {
                 ultimaRespuestaChat.set(chat.id, Date.now());
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 incrementarRespuestas(chat.id);
-                refrescarModoGestion(chat.id);  // 🆕 v3.2.2: renovar timeout
                 log(`✅ Enviado a ${chat.nombre}: "${frase.slice(0, 50)}${frase.length > 50 ? '...' : ''}"`, 'success');
-                // 🆕 v3.8.3: HeroCare confirmado que NO refresca solo la vista
-                // del chat activo cuando se le responde por API (el mensaje
-                // se guarda bien, pero queda "invisible" hasta F5). En vez de
-                // depender de eso, se pinta el mini-transcript del panel de
-                // DuTurbo con lo que realmente se mandó — 100% confiable.
-                if (chatActivoActual && chatActivoActual.id === chat.id) {
-                    const historialConEnviado = historial.concat([{
-                        texto: frase, esAgente: true, sortId: ultimo.sortId + 1
-                    }]);
-                    renderPreviewChatActivo(chat.id, chat.nombre, historialConEnviado);
-                }
             } else {
-                log(`❌ ${chat.nombre}: falló el envío por API`, 'error');
+                log(`❌ ${chat.nombre}: falló el envío`, 'error');
                 // Si falló el envío, liberar el cooldown (poner timestamp antiguo)
-                ultimaRespuestaChat.set(chat.id, Date.now() - COOLDOWN_MODO_GESTION - 1000);
+                ultimaRespuestaChat.set(chat.id, Date.now() - CONFIG.cooldownChat - 1000);
             }
+
+            await volverAChat(chatPrevio, chat);
         } catch (err) {
             log(`💥 Error: ${err.message}`, 'error');
             console.error(err);
@@ -2212,6 +1918,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             // para evitar que un ciclo entre antes de que el envío anterior se "asiente"
             setTimeout(() => {
                 chatsBloqueados.delete(chat.id);
+                botCambiandoChat = false;
             }, 3000);
         }
     }
@@ -2219,72 +1926,35 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
     // ════════════════════════════════════════════════════════════
     // 🔁 CICLO PRINCIPAL
     // ════════════════════════════════════════════════════════════
-    // 🆕 v3.8.0: ya no hay forma de saber "por contenido" si el chat activo
-    // tiene mensaje nuevo sin gastar una llamada a la API — eso ahora lo
-    // confirma procesarChat() consultando el historial. Acá solo quedan los
-    // filtros baratos (sin red): bloqueado, badge, estado marcado, cooldown.
-    // 🆕 v3.8.6: devuelve TODOS los elegibles (hasta maxCantidad), no solo
-    // el primero — así ciclo() puede procesarlos en paralelo.
-    function buscarChatsElegibles(chats, chatActivo, activoEscribiendo, maxCantidad) {
+    // 🆕 v3.9.0: el chat activo (el que el agente tiene abierto en pantalla)
+    // NUNCA se procesa automáticamente — por pedido explícito, para que el
+    // agente siempre vea la respuesta en vivo al abrir/escribir, sin
+    // depender de que HeroCare refresque una vista tocada en segundo plano.
+    // Solo se procesan los demás chats, y solo si tienen badge de no-leído.
+    function buscarChatsElegibles(chats, chatActivo, maxCantidad) {
         const elegibles = [];
         for (const chat of chats) {
             if (elegibles.length >= maxCantidad) break;
 
             const esElActivo = chatActivo && (chat.id === chatActivo.id);
-            const enModoGestion = estaEnModoGestion(chat.id);
+            if (esElActivo) continue;
 
-            // 🆕 v3.4.2: Si este chat ya está siendo procesado, saltar
             if (chatsBloqueados.has(chat.id)) continue;
+            if (!chat.tieneNuevos) continue;
+            if (estaDespedido(chat.id)) continue;
+            if (tieneSolucion(chat.id)) continue;
+            if (estaCritico(chat.id)) continue;
 
-            // v3.3.2: Si es el chat activo, solo procesa si está en Modo Gestión
-            if (esElActivo && !enModoGestion) continue;
-
-            // 🆕 v3.8.0: si el agente está escribiendo un borrador manual en
-            // el chat activo, no lo tratamos como candidato este tick (no
-            // queremos que el bot le "gane de mano" con una respuesta por API
-            // mientras compone la suya). Los DEMÁS chats siguen procesándose
-            // normal — ya no hay ningún salto visual que evitarles.
-            if (esElActivo && activoEscribiendo) continue;
-
-            // El chat activo en Modo Gestión no tiene badge (ya está "visto"
-            // por el agente) — se deja pasar siempre y procesarChat() decide
-            // si realmente hay algo nuevo. Los demás chats sí requieren badge.
-            if (!esElActivo && !chat.tieneNuevos) continue;
-
-            // v3.3.2: Logs explícitos sobre por qué NO se procesa (solo en modo gestion)
-            if (estaDespedido(chat.id)) {
-                if (enModoGestion) log(`⏭️ ${chat.nombre}: despedido (skip)`, 'info');
-                continue;
-            }
-            if (tieneSolucion(chat.id)) {
-                if (enModoGestion) log(`⏭️ ${chat.nombre}: solución dada (skip)`, 'info');
-                continue;
-            }
-            if (estaCritico(chat.id)) {
-                if (enModoGestion) log(`⏭️ ${chat.nombre}: crítico (skip)`, 'info');
-                continue;
-            }
-
-            // v3.3.2: Cooldown más relajado en modo gestión + log explícito
-            const cooldownAplicar = enModoGestion ? COOLDOWN_MODO_GESTION : CONFIG.cooldownChat;
             const ultimoEnvio = ultimaRespuestaChat.get(chat.id) || 0;
-            const transcurrido = Date.now() - ultimoEnvio;
-            if (transcurrido < cooldownAplicar) {
-                if (enModoGestion) {
-                    const restante = Math.ceil((cooldownAplicar - transcurrido) / 1000);
-                    log(`⏰ ${chat.nombre}: cooldown (faltan ${restante}s)`, 'info');
-                }
-                continue;
-            }
+            if (Date.now() - ultimoEnvio < CONFIG.cooldownChat) continue;
 
             elegibles.push(chat);
         }
         return elegibles;
     }
 
-    // 🆕 v3.8.6: SLA de respuesta (máx. 10s por mensaje). El agente maneja
-    // máximo 3 chats simultáneos en la práctica; 5 deja margen sin permitir
-    // un descontrol si algo falla.
+    // Máximo de chats en segundo plano a drenar en un mismo tick. El chat
+    // activo nunca cuenta acá (ver buscarChatsElegibles).
     const MAX_CHATS_POR_TICK = 5;
 
     async function ciclo() {
@@ -2294,27 +1964,19 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             const chats = leerChats();
             if (chats.length === 0) return;
 
-            let activoEscribiendo = false;
-            if (CONFIG.pausarSiAgenteEscribe) {
-                const taActivo = document.querySelector(SEL.textarea);
-                activoEscribiendo = !!(taActivo && taActivo.value && taActivo.value.trim().length > 0);
-            }
-
             const chatActivo = obtenerChatActivo(chats);
-            const candidatos = buscarChatsElegibles(chats, chatActivo, activoEscribiendo, MAX_CHATS_POR_TICK);
+            const candidatos = buscarChatsElegibles(chats, chatActivo, MAX_CHATS_POR_TICK);
 
             if (candidatos.length === 0) {
                 actualizarPanelEstado(chats, chatActivo);
                 return;
             }
 
-            // 🆕 v3.8.6: procesar TODOS los candidatos de este tick EN
-            // PARALELO. Antes se procesaban uno por uno (secuencial) porque
-            // hacía falta re-leer el DOM entre cada click; ahora que todo
-            // pasa por API sin tocar la pantalla, no hay motivo para poner
-            // a un chat a esperar a que termine otro — esto es lo que hace
-            // que el SLA de 10s aguante incluso con varios chats a la vez.
-            await Promise.all(candidatos.map(c => procesarChat(c)));
+            // 🆕 v3.9.0: secuencial de nuevo — cada respuesta implica clickear
+            // un chat de verdad, así que no se pueden procesar dos a la vez.
+            for (const c of candidatos) {
+                await procesarChat(c);
+            }
         } finally {
             cicloEnCurso = false;
         }
@@ -2343,8 +2005,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.8.9</span>
-                    <button id="dt-mini-toggle" title="Solo transcripción flotante (movible)">📌</button>
+                    <span id="dt-title">🤖 DuTurbo v3.9.0</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2353,16 +2014,8 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                         <label>Tu nombre:
                             <input id="dt-agente" type="text" placeholder="Ej: Duvan Ramos" value="${CONFIG.nombreAgente || ''}">
                         </label>
-                        <label style="margin-top:6px;">Modo de respuesta:
-                            <select id="dt-modo">
-                                <option value="rapido"${CONFIG.modoIA === 'rapido' ? ' selected' : ''}>🚀 Rápido (regex)</option>
-                                <option value="inteligente"${CONFIG.modoIA === 'inteligente' ? ' selected' : ''}>🧠 Inteligente (Claude vía backend)</option>
-                            </select>
-                        </label>
                     </div>
                     <div id="dt-estado">Esperando...</div>
-                    <div id="dt-preview"></div>
-                    <div id="dt-atajo" style="font-size:10px; color:#94a3b8; padding:4px 6px; margin-bottom:6px; background:rgba(192,223,22,.05); border-radius:4px;">💡 Ctrl+Shift+A = desactivar ayuda en chat activo</div>
                     <button id="dt-sonido" style="width:100%;padding:5px;border:1px solid rgba(255,255,255,0.1);border-radius:5px;background:rgba(255,255,255,0.05);color:#94a3b8;font-size:11px;cursor:pointer;">🔊 Sonido ON</button>
                     <div id="dt-templates" style="display:flex;gap:4px;flex-wrap:wrap;">
                         <input id="dt-monto" type="text" placeholder="Monto: ARS 5200" style="width:100%;box-sizing:border-box;background:#0f172a;color:#C0DF16;border:1px solid rgba(192,223,22,0.3);border-radius:5px;padding:5px 8px;font-size:11px;margin-bottom:4px;">
@@ -2426,6 +2079,20 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             @keyframes pulseDot {
                 0%, 100% { box-shadow: 0 0 10px #10b981; }
                 50% { box-shadow: 0 0 18px #10b981; }
+            }
+            /* 🆕 v3.9.0: crítico pisa el punto verde — imposible no notarlo,
+               incluso con el panel minimizado, hasta que se resuelva. */
+            .dt-fb-status.critico {
+                background: #dc2626 !important;
+                width: 14px;
+                height: 14px;
+                top: 2px;
+                right: 2px;
+                animation: pulseCriticoDot 0.9s infinite;
+            }
+            @keyframes pulseCriticoDot {
+                0%, 100% { box-shadow: 0 0 10px #dc2626; }
+                50% { box-shadow: 0 0 20px #ef4444; }
             }
 
             /* Panel expandido */
@@ -2528,46 +2195,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 overflow-y: auto;
             }
 
-            /* 🆕 v3.8.3: mini-transcript del chat activo, para ver lo que el
-               bot le mandó sin depender de que HeroCare refresque su vista */
-            #dt-preview {
-                display: none;
-                max-height: 160px;
-                overflow-y: auto;
-                font-size: 10.5px;
-                line-height: 1.4;
-                background: rgba(0,0,0,0.15);
-                border-radius: 6px;
-                padding: 6px;
-                margin-top: 4px;
-            }
-            #dt-preview.dt-preview-visible { display: block; }
-            #dt-preview .dt-preview-titulo {
-                color: #94a3b8;
-                font-size: 9.5px;
-                text-transform: uppercase;
-                letter-spacing: .04em;
-                margin-bottom: 4px;
-            }
-            .dt-preview-msg {
-                padding: 4px 7px;
-                border-radius: 8px;
-                margin-bottom: 4px;
-                max-width: 88%;
-                word-wrap: break-word;
-            }
-            .dt-preview-msg.agente {
-                background: rgba(192,223,22,0.15);
-                color: #e2e8f0;
-                margin-left: auto;
-            }
-            .dt-preview-msg.cliente {
-                background: rgba(255,255,255,0.06);
-                color: #cbd5e1;
-            }
-            #dt-preview::-webkit-scrollbar { width: 5px; }
-            #dt-preview::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-
             /* Logs */
             #dt-logs {
                 max-height: 160px;
@@ -2604,13 +2231,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             .chat-row.urgent { color: #fca5a5; font-weight: 700; }
             .chat-row.active { color: #C0DF16; font-weight: 600; }
             .chat-row.solucion { color: #67e8f9; }
-            .chat-row.gestion {
-                color: #fde047;
-                font-weight: 700;
-                background: rgba(253,224,71,0.1);
-                border-left: 2px solid #fde047;
-                padding: 4px 6px;
-            }
             .chat-row.critico {
                 color: #fff;
                 background: #dc2626;
@@ -2643,116 +2263,12 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
                 white-space: nowrap;
             }
             .dt-tpl-btn:hover { background: rgba(59,130,246,0.3); color: #fff; }
-            .dt-btn-gestion {
-                background: rgba(192,223,22,0.15);
-                color: #C0DF16;
-                border: 1px solid #C0DF16;
-                border-radius: 4px;
-                padding: 2px 6px;
-                font-size: 10px;
-                cursor: pointer;
-                margin-left: 4px;
-                font-weight: 700;
-                transition: all 0.2s;
-            }
-            .dt-btn-gestion:hover { background: #C0DF16; color: #000; }
-            .dt-btn-gestion.off {
-                background: rgba(220,38,38,0.2);
-                color: #fca5a5;
-                border-color: #fca5a5;
-            }
-            .dt-btn-gestion.off:hover { background: #dc2626; color: #fff; }
-
-            /* 🆕 v3.8.4: widget flotante e independiente, solo con el
-               mini-transcript, para no tapar la pantalla con el panel entero */
-            #dt-mini-toggle {
-                background: transparent;
-                border: none;
-                color: #94a3b8;
-                cursor: pointer;
-                font-size: 13px;
-                padding: 2px 4px;
-                margin-right: 4px;
-            }
-            #dt-mini-toggle:hover { color: #C0DF16; }
-
-            #dt-mini-transcript {
-                display: none;
-                position: fixed;
-                left: 20px;
-                top: 100px;
-                width: 230px;
-                z-index: 999998;
-                background: #1e293b;
-                border: 1px solid rgba(192,223,22,0.25);
-                border-radius: 10px;
-                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-                font-family: system-ui, -apple-system, sans-serif;
-                overflow: hidden;
-            }
-            #dt-mini-transcript.dt-mini-visible { display: block; }
-            #dt-mini-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 6px;
-                padding: 6px 8px;
-                background: rgba(192,223,22,0.08);
-                cursor: grab;
-                border-bottom: 1px solid rgba(255,255,255,0.06);
-            }
-            #dt-mini-header:active { cursor: grabbing; }
-            #dt-mini-nombre {
-                color: #e2e8f0;
-                font-size: 11px;
-                font-weight: 600;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
-            #dt-mini-cerrar {
-                background: transparent;
-                border: none;
-                color: #94a3b8;
-                cursor: pointer;
-                font-size: 13px;
-                flex-shrink: 0;
-            }
-            #dt-mini-cerrar:hover { color: #C0DF16; }
-            #dt-mini-contenido {
-                max-height: 220px;
-                overflow-y: auto;
-                padding: 6px;
-                font-size: 10.5px;
-            }
-            #dt-mini-contenido::-webkit-scrollbar { width: 5px; }
-            #dt-mini-contenido::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
         `;
 
         const style = document.createElement('style');
         style.textContent = css;
         document.head.appendChild(style);
         document.body.appendChild(wrapper);
-
-        // 🆕 v3.8.4: widget del mini-transcript, independiente del wrapper
-        // (así se puede mover por toda la pantalla sin depender de dónde
-        // esté anclado el panel/botón principal).
-        const miniWidget = document.createElement('div');
-        miniWidget.id = 'dt-mini-transcript';
-        miniWidget.innerHTML = `
-            <div id="dt-mini-header">
-                <span id="dt-mini-nombre">💬 Sin chat activo</span>
-                <button id="dt-mini-cerrar" title="Volver al panel completo">⬆️</button>
-            </div>
-            <div id="dt-mini-contenido"></div>
-        `;
-        document.body.appendChild(miniWidget);
-
-        const miniPosGuardada = JSON.parse(localStorage.getItem('duturbo_mini_pos') || 'null');
-        if (miniPosGuardada) {
-            miniWidget.style.left = miniPosGuardada.left + 'px';
-            miniWidget.style.top = miniPosGuardada.top + 'px';
-        }
 
         // Restaurar posición guardada del wrapper
         if (posGuardada) {
@@ -2771,31 +2287,11 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         const expandir = () => {
             wrapper.classList.add('expanded');
             localStorage.setItem('duturbo_expandido', '1');
-            ocultarMini();
         };
         const minimizar = () => {
             wrapper.classList.remove('expanded');
             localStorage.setItem('duturbo_expandido', '0');
         };
-
-        // 🆕 v3.8.4: MODO TRANSCRIPCIÓN FLOTANTE (widget aparte, movible)
-        const mostrarMini = () => {
-            minimizar();
-            miniWidget.classList.add('dt-mini-visible');
-            localStorage.setItem('duturbo_mini_activo', '1');
-        };
-        const ocultarMini = () => {
-            miniWidget.classList.remove('dt-mini-visible');
-            localStorage.setItem('duturbo_mini_activo', '0');
-        };
-
-        // Restaurar si el widget mini estaba visible en la sesión anterior
-        if (localStorage.getItem('duturbo_mini_activo') === '1') {
-            miniWidget.classList.add('dt-mini-visible');
-        }
-
-        document.getElementById('dt-mini-toggle').onclick = mostrarMini;
-        document.getElementById('dt-mini-cerrar').onclick = expandir;
 
         const floatingBtn = document.getElementById('dt-floating-btn');
         floatingBtn.addEventListener('click', (e) => {
@@ -2807,37 +2303,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         });
 
         document.getElementById('dt-min').onclick = minimizar;
-
-        // ──────────────────────────────────────────
-        // DRAG DEL WIDGET MINI (independiente del wrapper principal)
-        // ──────────────────────────────────────────
-        let dragMini = false, miniStartX, miniStartY, miniInitialX, miniInitialY;
-        const miniHeader = document.getElementById('dt-mini-header');
-        miniHeader.addEventListener('mousedown', (e) => {
-            if (e.target.id === 'dt-mini-cerrar') return;
-            dragMini = true;
-            miniStartX = e.clientX;
-            miniStartY = e.clientY;
-            const rect = miniWidget.getBoundingClientRect();
-            miniInitialX = rect.left;
-            miniInitialY = rect.top;
-            e.preventDefault();
-        });
-        document.addEventListener('mousemove', (e) => {
-            if (!dragMini) return;
-            const dx = e.clientX - miniStartX;
-            const dy = e.clientY - miniStartY;
-            const maxX = window.innerWidth - 230;
-            const maxY = window.innerHeight - 60;
-            miniWidget.style.left = Math.max(0, Math.min(maxX, miniInitialX + dx)) + 'px';
-            miniWidget.style.top = Math.max(0, Math.min(maxY, miniInitialY + dy)) + 'px';
-        });
-        document.addEventListener('mouseup', () => {
-            if (!dragMini) return;
-            dragMini = false;
-            const rect = miniWidget.getBoundingClientRect();
-            localStorage.setItem('duturbo_mini_pos', JSON.stringify({ left: rect.left, top: rect.top }));
-        });
 
         // ──────────────────────────────────────────
         // DRAG DEL BOTONCITO
@@ -2862,7 +2327,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         let dragHeader = false, headerStartX, headerStartY, headerInitialX, headerInitialY;
         const header = document.getElementById('dt-header');
         header.addEventListener('mousedown', (e) => {
-            if (e.target.id === 'dt-min' || e.target.id === 'dt-mini-toggle') return;
+            if (e.target.id === 'dt-min') return;
             dragHeader = true;
             headerStartX = e.clientX;
             headerStartY = e.clientY;
@@ -2936,23 +2401,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             CONFIG.nombreAgente = e.target.value.trim();
             log(`👤 Agente: "${CONFIG.nombreAgente}"`, 'info');
         };
-        document.getElementById('dt-modo').onchange = (e) => {
-            CONFIG.modoIA = e.target.value;
-            log(`🔀 Modo: ${CONFIG.modoIA === 'rapido' ? '🚀 Rápido' : '🧠 Inteligente'}`, 'info');
-        };
-
-        // Atajo Ctrl+Shift+A para Modo Gestión
-        document.addEventListener('keydown', (e) => {
-            if (e.ctrlKey && e.shiftKey && (e.key === 'a' || e.key === 'A')) {
-                e.preventDefault();
-                if (chatActivoActual) {
-                    toggleModoGestion(chatActivoActual.id, chatActivoActual.nombre);
-                } else {
-                    log('⚠️ Atajo: primero haz click en un chat', 'warn');
-                }
-            }
-        });
-
         // 🆕 v3.5.6: Toggle sonido
         document.getElementById('dt-sonido').onclick = () => {
             sonidoActivo = !sonidoActivo;
@@ -3041,52 +2489,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         if (status) status.classList.toggle('on', activo);
     }
 
-    function escapeHtml(s) {
-        return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    }
-
-    // 🆕 v3.8.3: mini-transcript del chat activo, para que el agente vea lo
-    // que el bot mandó SIN depender de que HeroCare refresque su propia
-    // vista (confirmado que no lo hace en vivo).
-    // 🆕 v3.8.4: pinta el mismo contenido en DOS lugares: el panel completo
-    // (#dt-preview) y el widget mini flotante e independiente
-    // (#dt-mini-contenido), estén o no visibles — así, al togglear entre
-    // uno y otro, siempre muestran el dato más reciente sin re-consultar nada.
-    function renderPreviewChatActivo(chatId, nombreCliente, historial) {
-        const div = document.getElementById('dt-preview');
-        const miniDiv = document.getElementById('dt-mini-contenido');
-        const miniNombre = document.getElementById('dt-mini-nombre');
-        if (!div && !miniDiv) return;
-        // Si mientras tanto el agente cambió de chat, no pisar la vista nueva
-        // con datos viejos que llegaron tarde.
-        if (!chatActivoActual || chatActivoActual.id !== chatId) return;
-
-        if (!historial || historial.length === 0) {
-            if (div) { div.classList.remove('dt-preview-visible'); div.innerHTML = ''; }
-            if (miniDiv) miniDiv.innerHTML = '';
-            if (miniNombre) miniNombre.textContent = `💬 ${nombreCliente || 'Sin chat activo'}`;
-            return;
-        }
-
-        const ultimos = historial.slice(-6);
-        const filas = ultimos.map(m => {
-            const texto = m.esAgente ? m.texto : limpiarTextoBurbuja(m.texto, nombreCliente);
-            const clase = m.esAgente ? 'agente' : 'cliente';
-            return `<div class="dt-preview-msg ${clase}">${escapeHtml(texto)}</div>`;
-        }).join('');
-
-        if (div) {
-            div.innerHTML = `<div class="dt-preview-titulo">💬 ${escapeHtml(nombreCliente)} — lo que ya se mandó (esto SÍ está confirmado, aunque HeroCare tarde en mostrarlo)</div>${filas}`;
-            div.classList.add('dt-preview-visible');
-            div.scrollTop = div.scrollHeight;
-        }
-        if (miniDiv) {
-            miniDiv.innerHTML = filas;
-            miniDiv.scrollTop = miniDiv.scrollHeight;
-        }
-        if (miniNombre) miniNombre.textContent = `💬 ${nombreCliente}`;
-    }
-
     function actualizarPanelEstado(chats, chatActivo) {
         const div = document.getElementById('dt-estado');
         if (!div) return;
@@ -3100,13 +2502,15 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         if (!chatActivo && activo) {
             html += `<div style="color:#fcd34d; padding:4px; margin-bottom:4px; background:rgba(252,211,77,.1); border-radius:3px; font-size:10px;">⚠️ Click en un chat para identificarlo</div>`;
         }
+        let hayCritico = false; // 🆕 v3.9.0: para marcar el botón flotante
+
         chats.forEach(c => {
             const esActivo = chatActivo && c.id === chatActivo.id;
             const despedido = estaDespedido(c.id);
             const conSolucion = tieneSolucion(c.id);
             const critico = estaCritico(c.id);
-            const enGestion = estaEnModoGestion(c.id);
             const etapa = respuestasPorChat.get(c.id) || 0;
+            if (critico) hayCritico = true;
 
             // 🆕 v3.5.6: Timer
             const inicio = tiempoInicioPorChat.get(c.id);
@@ -3126,35 +2530,22 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
 
             let cls = '', tag = '';
             if (critico && !esActivo) { cls = 'critico'; tag = `🔴 ATENDER YA`; }
-            else if (esActivo && enGestion) { cls = 'gestion'; tag = '👁️'; }
             else if (esActivo) { cls = 'active'; tag = '👤'; }
             else if (despedido) { tag = '🚫'; }
             else if (conSolucion) { cls = 'solucion'; tag = '💰'; }
             else if (c.tieneNuevos) { cls = 'urgent'; tag = `🟢${c.mensajesSinLeer}`; }
             else { tag = '⚪'; }
             const etapaStr = etapa > 0 ? ` [#${etapa}]` : '';
-            const botonGestion = esActivo
-                ? (enGestion
-                    ? `<button class="dt-btn-gestion off" data-chat="${c.id}" data-nombre="${c.nombre}" title="Desactivar ayuda">🛑</button>`
-                    : `<button class="dt-btn-gestion" data-chat="${c.id}" data-nombre="${c.nombre}" title="Activar ayuda">🤝</button>`)
-                : '';
-            const gestionLabel = enGestion ? ' <span style="color:#fde047; font-size:9px;">MODO</span>' : '';
-            html += `<div class="chat-row ${cls}"><span>${tag} ${c.nombre}${etapaStr}${timerStr}${gestionLabel}</span>${botonGestion}</div>`;
+            html += `<div class="chat-row ${cls}"><span>${tag} ${c.nombre}${etapaStr}${timerStr}</span></div>`;
         });
         div.innerHTML = html;
 
-        // 🆕 v3.5.6: Sonar si hay alerta
+        // 🆕 v3.5.6: Sonar si hay alerta de timer. 🆕 v3.9.0: marcar el
+        // botón flotante en rojo mientras haya algún chat crítico — visible
+        // incluso con el panel minimizado, hasta que se resuelva.
         if (hayAlerta) playAlertSound();
-
-        // Bind clicks de los botones de Modo Gestión
-        div.querySelectorAll('.dt-btn-gestion').forEach(btn => {
-            btn.onclick = (e) => {
-                e.stopPropagation();
-                const chatId = btn.getAttribute('data-chat');
-                const nombre = btn.getAttribute('data-nombre');
-                toggleModoGestion(chatId, nombre);
-            };
-        });
+        const status = document.querySelector('.dt-fb-status');
+        if (status) status.classList.toggle('critico', hayCritico);
     }
 
     function actualizarPanelLogs() {
@@ -3177,9 +2568,8 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.8.9 cargado (IA con contexto real + red de seguridad)', 'success');
+        log('🚀 DuTurbo v3.9.0 cargado (solo Modo Rápido, envío 100% visible)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
-        log(`🧠 Modo Inteligente vía backend: ${CONFIG.backendURL}`, 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
 
@@ -3197,12 +2587,6 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
         reset: (id) => resetChatLigero(id),
         testSaludo: (msg, nombre) => detectarSaludo(msg, nombre),
         testImagen: (msg) => mensajeTieneImagen(msg),
-        gestion: {
-            activar: (id, nombre) => activarModoGestion(id, nombre),
-            desactivar: (id) => desactivarModoGestion(id, 'manual via API'),
-            toggle: (id, nombre) => toggleModoGestion(id, nombre),
-            activos: () => Array.from(chatsEnModoGestion.keys())
-        },
         estado: () => ({
             activo,
             chatActivo: chatActivoActual,
@@ -3211,8 +2595,7 @@ Responde SOLO con el texto a enviar, sin comillas ni explicaciones.`;
             conSolucion: Object.fromEntries(chatsConSolucion),
             criticos: Object.fromEntries(chatsCriticos),
             imagenes: Object.fromEntries(imagenesPorChat),
-            modoGestion: Object.fromEntries(chatsEnModoGestion),
-            // 🆕 v3.8.0: diagnóstico de la API directa
+            // 🆕 v3.8.0: diagnóstico de la API directa (solo lectura)
             apiAuthCapturado: !!authCapturado,
             apiIdentityId: identityIdEfectivo(),
             apiUsername: usernameEfectivo(),
