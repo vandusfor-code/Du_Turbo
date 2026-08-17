@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.9.3
-// @description  v3.9.3: FIX critico de v3.9.0 — el chat activo (el que el agente tiene abierto) habia quedado excluido de la respuesta automatica por completo. La razon original (v3.8.2/3.8.3: HeroCare no refrescaba su vista cuando se respondia por API en silencio) ya no aplica desde que el envio volvio a ser 100% visible por UI real en v3.9.0 — asi que no hay motivo tecnico para seguir excluyendolo. Ahora se incluye igual que cualquier otro chat (sin badge, procesarChat decide por sort_id via API si hay algo nuevo), sin la complejidad del viejo Modo Gestion (sin botones, sin atajo, sin estado manual). Si el agente esta escribiendo un borrador en el chat activo, el bot no lo pisa. Optimizacion: si el chat a responder ya es el activo, no se lo clickea de nuevo (ahorra el click y 700ms de delay). v3.9.2: auditoria exhaustiva completa (sin bugs nuevos, limpieza de dato muerto agentJwt). v3.9.1: chatsCriticos por NO TOCAR ahora es sticky (no expira solo a los 2 min); ciclo() refresca el panel siempre al final. v3.9.0: se elimina Modo Inteligente (IA) y Modo Gestion; el envio vuelve a ser 100% visible por UI real; la lectura sigue por la API directa de HeroCare; alerta sonora + indicador visual persistente cuando un chat queda critico.
+// @version      3.9.4
+// @description  v3.9.4: Herramienta de diagnostico — duTurbo.verHistorial('nombre o id') trae el historial REAL de un chat via API y muestra por consola, linea por linea, si cada mensaje del agente matchea esDespedida()/PATRONES_SOLUCION_DADA. Se agrega para depurar con datos reales (no adivinando) un reporte de que el bot sigue respondiendo despues de frases de cierre que, segun el codigo, deberian detenerlo. v3.9.3: FIX critico — el chat activo volvio a incluirse en la respuesta automatica (v3.9.0 lo habia dejado mudo por completo; la razon tecnica original ya no aplicaba). v3.9.2: auditoria exhaustiva completa. v3.9.1: chatsCriticos por NO TOCAR ahora es sticky; ciclo() refresca el panel siempre al final. v3.9.0: se elimina Modo Inteligente (IA) y Modo Gestion; el envio vuelve a ser 100% visible por UI real; la lectura sigue por la API directa de HeroCare; alerta sonora + indicador visual persistente cuando un chat queda critico.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -2044,7 +2044,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.9.3</span>
+                    <span id="dt-title">🤖 DuTurbo v3.9.4</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2607,7 +2607,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.9.3 cargado (chat activo también se responde solo)', 'success');
+        log('🚀 DuTurbo v3.9.4 cargado (agrega duTurbo.verHistorial para diagnóstico)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
@@ -2639,6 +2639,43 @@
             apiIdentityId: identityIdEfectivo(),
             apiUsername: usernameEfectivo(),
             apiRoomsEnCache: Array.from(roomInfoPorTicket.keys())
-        })
+        }),
+        // 🆕 v3.9.4: diagnóstico — trae el historial REAL de un chat (por id
+        // o por nombre) y muestra, línea por línea, si cada mensaje del
+        // agente matchea esDespedida()/PATRONES_SOLUCION_DADA. Para
+        // depurar "el bot sigue respondiendo después de X frase" con datos
+        // reales en vez de adivinar. Ejemplo: await duTurbo.verHistorial('ambar')
+        verHistorial: async (idOChatNombre) => {
+            const chats = leerChats();
+            const chat = chats.find(c => c.id === idOChatNombre || c.nombre.toLowerCase() === String(idOChatNombre).toLowerCase());
+            if (!chat) {
+                console.log('[DuTurbo] No encontré ese chat. Disponibles:', chats.map(c => ({ id: c.id, nombre: c.nombre })));
+                return null;
+            }
+            const room = await obtenerRoomInfo(chat.id);
+            if (!room) {
+                console.log('[DuTurbo] No pude obtener room info (¿ya se capturó el token de sesión?)');
+                return null;
+            }
+            const crudos = await obtenerHistorialCrudo(room);
+            if (!crudos) {
+                console.log('[DuTurbo] No pude leer el historial.');
+                return null;
+            }
+            const historial = clasificarMensajesHistorial(crudos, room.name);
+            const tabla = historial.map(m => ({
+                sortId: m.sortId,
+                quien: m.esAgente ? 'AGENTE' : 'cliente',
+                texto: m.texto,
+                esDespedida: m.esAgente ? esDespedida(m.texto) : null,
+                esSolucion: m.esAgente ? PATRONES_SOLUCION_DADA.some(rx => rx.test(m.texto)) : null
+            }));
+            console.table(tabla);
+            console.log('agenteYaSeDespidio(historial completo):', agenteYaSeDespidio(historial));
+            console.log('agenteYaDioSolucion(historial completo):', agenteYaDioSolucion(historial));
+            console.log('estaDespedido (caché local):', estaDespedido(chat.id));
+            console.log('tieneSolucion (caché local):', tieneSolucion(chat.id));
+            return { room, historialCrudo: crudos, tabla };
+        }
     };
 })();
