@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.12.0
-// @description  v3.12.0: "Flight recorder" — tercera mejora acordada. Cada respuesta real y cada escalacion se manda en segundo plano (fire-and-forget, nunca bloquea ni retrasa el envio real) a backend/api/registrar-log.js, que solo hace un INSERT en la tabla duturbo_logs de Supabase — sin llamar a ninguna IA (a diferencia del viejo generar-respuesta.js, que ya no se usa). Guarda mensaje, respuesta enviada (o null si escalo), latencia real medida, y la razon si escalo. Objetivo: tener historial real con el tiempo para ver tendencias, sin agregar riesgo ni latencia al flujo del bot. Requiere una columna nueva en Supabase: ALTER TABLE public.duturbo_logs ADD COLUMN razon text; Se puede desactivar con CONFIG.logRemotoActivo=false. v3.11.0: duTurbo.escanearChats() para encontrar huecos reales del banco de frases. v3.10.x: medicion de TMR real (% de incumplimiento, formato de la plataforma). v3.9.x: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, timeout de red, alerta de critico, duTurbo.verHistorial().
+// @version      3.13.0
+// @description  v3.13.0: Boton "Despedida" de un click junto a Cupon/Tarjeta/Wallet — manda un cierre + pedido de encuesta ya armado, sin monto. Decision de diseño explicita: NO se automatizo el envio de cupon/devolucion solo (eso es una accion de plata que necesita revision humana, no algo que un bot deba decidir), pero el cierre SI se puede acelerar de forma segura. El texto esta armado para matchear PATRONES_DESPEDIDA a proposito — apenas se manda, el bot se auto-detecta y deja de responder ese chat, sin pasos extra. v3.12.0: flight recorder en Supabase (sin IA). v3.11.0: duTurbo.escanearChats() para huecos del banco de frases. v3.10.x: medicion de TMR real (% de incumplimiento, formato de la plataforma). v3.9.x: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, timeout de red, alerta de critico, duTurbo.verHistorial().
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -2205,7 +2205,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.12.0</span>
+                    <span id="dt-title">🤖 DuTurbo v3.13.0</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2223,6 +2223,7 @@
                         <button class="dt-tpl-btn" data-tpl="cupon">💳 Cupón</button>
                         <button class="dt-tpl-btn" data-tpl="tarjeta">💳 Tarjeta</button>
                         <button class="dt-tpl-btn" data-tpl="wallet">💳 Wallet</button>
+                        <button class="dt-tpl-btn" data-tpl="despedida" title="Despedida + encuesta, sin monto">🙏 Despedida</button>
                     </div>
                     <div id="dt-logs"></div>
                 </div>
@@ -2636,6 +2637,13 @@
             wallet: (monto) => `Ya realicé la devolución de ${monto} como saldo en PedidosYa. Recuerda que el mismo tiene validez por 2 años. Puedes corroborarlo ingresando desde el menú principal de la app a tu billetera PedidosYa\nPuedes encontrar toda la información de tu devolución ingresando a 'Pedidos' desde la app y seleccionando este pedido.`
         };
 
+        // 🆕 v3.13.0: cierre de un click (despedida + encuesta) — no depende
+        // de un monto, así que va aparte de TEMPLATES/pegarTemplate. El texto
+        // está armado a propósito para matchear PATRONES_DESPEDIDA (ver
+        // esDespedida): apenas se manda, el bot se auto-detecta y deja de
+        // responder ese chat solo, sin que haya que hacer nada más.
+        const TEXTO_DESPEDIDA = "Ha sido un placer poder atenderte. Por último, ¿sería posible que me ayudes respondiendo una breve encuesta para calificar mi atención? ¡Muchas gracias y que tengas un excelente día!";
+
         // 🆕 v3.5.6: Guardar último monto detectado del popup de Éxito
         let ultimoMontoDetectado = null;
 
@@ -2692,8 +2700,15 @@
             }
         }
 
+        // 🆕 v3.13.0: cierre de un click — no lleva monto, va directo.
+        async function pegarDespedida() {
+            const ok = await enviarMensaje(TEXTO_DESPEDIDA);
+            if (ok) log('🙏 Despedida + encuesta enviada', 'success');
+        }
+
         document.querySelectorAll('.dt-tpl-btn').forEach(btn => {
-            btn.onclick = () => pegarTemplate(btn.getAttribute('data-tpl'));
+            const tipo = btn.getAttribute('data-tpl');
+            btn.onclick = tipo === 'despedida' ? pegarDespedida : () => pegarTemplate(tipo);
         });
     }
 
@@ -2827,7 +2842,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.12.0 cargado (flight recorder en Supabase, sin IA)', 'success');
+        log('🚀 DuTurbo v3.13.0 cargado (botón de despedida de un click)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
