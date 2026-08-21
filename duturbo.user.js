@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.10.1
-// @description  v3.10.1: FIX — el TMR que muestra la plataforma real es un % de INCUMPLIMIENTO (mas bajo = mejor, objetivo 3.5%, un TMR de 23% es malo). v3.10.0 calculaba y mostraba el % que SI llego a tiempo (la metrica invertida), asi que el numero del panel no era comparable de un vistazo contra el dashboard real. Ahora dt-tmr-stats muestra "TMR: X.X% (objetivo 3.5%)" en el mismo formato que ya usás, y se pone en rojo cuando supera el objetivo. v3.10.0: medicion de TMR real — tiempo desde que el bot detecta un mensaje nuevo hasta que lo manda, sin contar los casos en que decide no responder a proposito (despedida, solucion dada, NO TOCAR, etapa critica). Disponible por consola: duTurbo.tmr() / duTurbo.tmrDetalle(). v3.9.5: timeout de red para que un fetch colgado no congele el bot entero; se verifica el textarea ANTES de gastar una frase de la regla de oro; reintento del boton Enviar; alerta si no se capturo el token de sesion. v3.9.0-3.9.4: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, duTurbo.verHistorial().
+// @version      3.11.0
+// @description  v3.11.0: duTurbo.escanearChats() — segunda mejora acordada. Escanea TODOS los chats abiertos y clasifica cada mensaje de cliente contra lo que el bot ya reconoce (TEMAS_CLIENTE, confirmacion corta, cierre, NO TOCAR). Imprime una tabla con la clasificacion de cada mensaje y otra solo con los que NO matchean NINGUNA categoria (candidatos reales a un TEMA_CLIENTE nuevo) — para ampliar el banco de frases con datos reales en vez de imaginar casos. v3.10.1: TMR mostrado como % de incumplimiento (formato real de la plataforma, objetivo 3.5%). v3.10.0: medicion de TMR real por mensaje. v3.9.5: timeout de red, verificacion de textarea antes de gastar una frase de la regla de oro, reintento del boton Enviar, alerta si no se capturo el token de sesion. v3.9.0-3.9.4: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, duTurbo.verHistorial().
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -2175,7 +2175,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.10.1</span>
+                    <span id="dt-title">🤖 DuTurbo v3.11.0</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2797,7 +2797,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.10.1 cargado (TMR ahora en % de incumplimiento, como en la plataforma)', 'success');
+        log('🚀 DuTurbo v3.11.0 cargado (agrega duTurbo.escanearChats para encontrar huecos)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
@@ -2869,6 +2869,68 @@
             console.log('estaDespedido (caché local):', estaDespedido(chat.id));
             console.log('tieneSolucion (caché local):', tieneSolucion(chat.id));
             return { room, historialCrudo: crudos, tabla };
+        },
+        // 🆕 v3.11.0: escanea TODOS los chats abiertos y clasifica cada
+        // mensaje de cliente contra lo que el bot ya sabe reconocer
+        // (TEMAS_CLIENTE, confirmación corta, cierre, NO TOCAR). El objetivo
+        // es encontrar huecos REALES del banco de frases con datos reales,
+        // en vez de imaginar casos: un mensaje sustancial que no matchea
+        // NINGUNA categoría es candidato a un TEMA_CLIENTE nuevo. Uso:
+        // await duTurbo.escanearChats()
+        escanearChats: async () => {
+            const chats = leerChats();
+            if (chats.length === 0) {
+                console.log('[DuTurbo] No hay chats abiertos para escanear.');
+                return null;
+            }
+            console.log(`[DuTurbo] Escaneando ${chats.length} chat(s)...`);
+
+            const resumen = [];
+            const huecos = [];
+
+            for (const chat of chats) {
+                const room = await obtenerRoomInfo(chat.id);
+                if (!room) { console.log(`[DuTurbo] ${chat.nombre}: no pude obtener room info`); continue; }
+                const crudos = await obtenerHistorialCrudo(room);
+                if (!crudos) { console.log(`[DuTurbo] ${chat.nombre}: no pude leer historial`); continue; }
+                const historial = clasificarMensajesHistorial(crudos, room.name);
+
+                for (const m of historial) {
+                    if (m.esAgente) continue;
+                    const texto = limpiarTextoBurbuja(m.texto, chat.nombre);
+                    if (!texto) continue;
+
+                    const noTocar = esClienteNoTocar(texto);
+                    const esConfirm = esConfirmacionCorta(texto) || esAcuseDeEspera(texto);
+                    const esCierre = esCierreDelCliente(texto);
+                    const tema = detectarTemaCliente(texto);
+
+                    const categoria = noTocar ? `NO_TOCAR (${noTocar})`
+                        : tema ? `tema: ${tema.tema}`
+                        : esConfirm ? 'confirmación corta'
+                        : esCierre ? 'cierre del cliente'
+                        : 'SIN RECONOCER';
+
+                    resumen.push({ chat: chat.nombre, sortId: m.sortId, texto, categoria });
+
+                    // "Hueco real": mensaje con contenido (no un fragmento
+                    // trivial) que no cae en NINGUNA categoría conocida —
+                    // caería en la frase genérica de espera sin
+                    // reconocimiento contextual. Los NO_TOCAR/confirmación/
+                    // cierre YA están cubiertos a propósito, no son huecos.
+                    if (!tema && !esConfirm && !esCierre && !noTocar && texto.length >= 12) {
+                        huecos.push({ chat: chat.nombre, texto, sortId: m.sortId });
+                    }
+                }
+
+                await sleep(250); // no golpear la API en ráfaga
+            }
+
+            console.log(`[DuTurbo] ${resumen.length} mensaje(s) de cliente clasificados:`);
+            console.table(resumen);
+            console.log(`[DuTurbo] ${huecos.length} mensaje(s) SIN reconocimiento contextual (candidatos a un TEMA_CLIENTE nuevo):`);
+            console.table(huecos);
+            return { resumen, huecos };
         }
     };
 })();
