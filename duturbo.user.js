@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.9.4
-// @description  v3.9.4: Herramienta de diagnostico — duTurbo.verHistorial('nombre o id') trae el historial REAL de un chat via API y muestra por consola, linea por linea, si cada mensaje del agente matchea esDespedida()/PATRONES_SOLUCION_DADA. Se agrega para depurar con datos reales (no adivinando) un reporte de que el bot sigue respondiendo despues de frases de cierre que, segun el codigo, deberian detenerlo. v3.9.3: FIX critico — el chat activo volvio a incluirse en la respuesta automatica (v3.9.0 lo habia dejado mudo por completo; la razon tecnica original ya no aplicaba). v3.9.2: auditoria exhaustiva completa. v3.9.1: chatsCriticos por NO TOCAR ahora es sticky; ciclo() refresca el panel siempre al final. v3.9.0: se elimina Modo Inteligente (IA) y Modo Gestion; el envio vuelve a ser 100% visible por UI real; la lectura sigue por la API directa de HeroCare; alerta sonora + indicador visual persistente cuando un chat queda critico.
+// @version      3.9.5
+// @description  v3.9.5: Auditoria enfocada en "que no quede un mensaje sin responder" (TMR). 1) FIX GRAVE — ninguna llamada a la API de HeroCare tenia timeout; un solo fetch colgado (red inestable) congelaba el bot ENTERO para siempre (cicloEnCurso nunca se liberaba), no solo un chat. Ahora las dos llamadas usan fetchConTimeout (8s). 2) Si el envio fallaba (textarea con un borrador viejo del agente, boton Enviar tardando en habilitarse), la frase ya se habia gastado de la regla de oro ANTES de saber si se iba a poder mandar — con fallas repetidas un chat podia terminar marcado "sin frase libre" sin haber recibido ni una sola respuesta real. Ahora se abre el chat y se verifica que el textarea este disponible ANTES de generar/gastar la frase. 3) enviarMensaje reintenta buscar el boton Enviar hasta 3 veces (900ms extra) antes de rendirse, por si HeroCare tarda en habilitarlo. 4) Si el bot esta activo pero todavia no se capturo el token de sesion, NO puede responder NINGUN chat — antes esto casi no se notaba; ahora suena y marca el boton flotante en rojo igual que un chat critico, incluso sin chats en la lista. v3.9.4: duTurbo.verHistorial() para diagnostico con datos reales. v3.9.3: el chat activo volvio a incluirse en la respuesta automatica. v3.9.0-3.9.2: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, auditoria exhaustiva.
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -179,12 +179,32 @@
         };
     }
 
+    // 🐛 fix (auditoría v3.9.5): ninguna de las llamadas a la API de HeroCare
+    // tenía timeout. Si una sola se cuelga (red inestable, servidor lento),
+    // el fetch queda pendiente para siempre — y como ciclo() hace `await`
+    // secuencial de cada procesarChat(), y cicloEnCurso no se libera hasta
+    // que ciclo() termina, UN SOLO fetch colgado congela el bot ENTERO, no
+    // solo ese chat: ningún otro chat vuelve a procesarse nunca más. Con
+    // timeout, en el peor caso se pierden TIMEOUT_API_MS por chat, nunca el
+    // bot completo.
+    const TIMEOUT_API_MS = 8000;
+
+    async function fetchConTimeout(url, options) {
+        const ctrl = new AbortController();
+        const timeoutId = setTimeout(() => ctrl.abort(), TIMEOUT_API_MS);
+        try {
+            return await fetch(url, { ...options, signal: ctrl.signal });
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    }
+
     async function obtenerRoomInfo(ticketId) {
         const cacheado = roomInfoPorTicket.get(ticketId);
         if (cacheado) return cacheado;
         if (!authCapturado) return null;
         try {
-            const resp = await fetch(`${API_BASE}/tickets/${ticketId}/room`, {
+            const resp = await fetchConTimeout(`${API_BASE}/tickets/${ticketId}/room`, {
                 method: 'GET',
                 headers: { 'Authorization': authCapturado, 'Accept': 'application/json' }
             });
@@ -212,7 +232,7 @@
         if (!authCapturado) return null;
         try {
             const url = `${API_BASE}/rooms/${room.id}/history?roomName=${encodeURIComponent(room.name)}&entityId=${encodeURIComponent(room.entityId)}&geid=${encodeURIComponent(room.gei)}&department=CS`;
-            const resp = await fetch(url, {
+            const resp = await fetchConTimeout(url, {
                 method: 'GET',
                 headers: { 'Authorization': authCapturado, 'Accept': 'application/json' }
             });
@@ -1743,6 +1763,18 @@
     // en pantalla — así HeroCare siempre refresca solo, es una acción real
     // de UI, no una llamada silenciosa por API.
     // ════════════════════════════════════════════════════════════
+    // 🆕 v3.9.5: chequeo aislado de "¿se puede escribir en este chat ahora
+    // mismo?" — se usa ANTES de generar/gastar una frase de la regla de oro
+    // (ver procesarChat), para no quemar una frase en un intento que ya
+    // sabíamos que no se iba a poder mandar (p. ej. un borrador viejo del
+    // agente en ese chat puntual).
+    function textareaDisponible() {
+        const ta = document.querySelector(SEL.textarea);
+        if (!ta) return false;
+        if (CONFIG.pausarSiAgenteEscribe && ta.value && ta.value.trim().length > 0) return false;
+        return true;
+    }
+
     async function enviarMensaje(texto) {
         const ta = document.querySelector(SEL.textarea);
         if (!ta) {
@@ -1761,8 +1793,20 @@
         ta.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: texto }));
         ta.dispatchEvent(new Event('change', { bubbles: true }));
         await sleep(CONFIG.delayAntesDeEnviar);
-        const botones = Array.from(document.querySelectorAll('button'));
-        const btn = botones.find(b => /enviar|send/i.test(b.textContent.trim()) && !b.disabled);
+
+        // 🆕 v3.9.5: reintenta buscar el botón Enviar un par de veces más
+        // antes de rendirse — si HeroCare tarda un poco de más en habilitarlo
+        // tras el evento 'input' (variable según carga de la página), el
+        // intento único anterior podía fallar por una simple cuestión de
+        // timing, no porque el envío realmente no se pudiera hacer.
+        const buscarBotonEnviar = () => Array.from(document.querySelectorAll('button'))
+            .find(b => /enviar|send/i.test(b.textContent.trim()) && !b.disabled);
+
+        let btn = buscarBotonEnviar();
+        for (let intento = 0; !btn && intento < 3; intento++) {
+            await sleep(300);
+            btn = buscarBotonEnviar();
+        }
         if (!btn) {
             log('❌ Botón Enviar no disponible', 'error');
             return false;
@@ -1890,22 +1934,19 @@
                 return;
             }
 
-            // Generar respuesta (saludos espejeados tienen prioridad)
-            const frase = await generarRespuesta(mensaje, etapa, chat.id, chat.nombre, historial);
-            if (!frase) {
-                marcarCritico(chat.id, chat.nombre, 'sin frase libre de repetición');
-                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
-                return;
-            }
-
-            // 🆕 v3.4.2: Marcar cooldown ANTES de enviar (no después)
-            // Esto evita que otro ciclo procese el mismo chat mientras estamos enviando
-            ultimaRespuestaChat.set(chat.id, Date.now());
-
-            // Abrir el chat (visible) y enviar por la UI real. 🆕 v3.9.3: si
-            // ya es el chat activo (el agente lo tiene abierto), no hace
-            // falta clickearlo de nuevo — ya está mostrando la conversación
-            // correcta, así que se ahorra el click y el delay de cambio.
+            // 🆕 v3.9.5: abrir el chat (visible) ANTES de generar la
+            // respuesta — así, si el textarea no está disponible (p. ej. un
+            // borrador viejo del agente quedó en ESE chat puntual), se aborta
+            // sin haber gastado una frase de la regla de oro en un intento
+            // que ya se sabía que no se iba a poder mandar. Antes esto se
+            // hacía después de generar, así que un envío fallido igual
+            // "quemaba" la frase — con suficientes fallas seguidas, un chat
+            // podía terminar marcado "sin frase libre" sin haber recibido
+            // ni una sola respuesta real.
+            // 🆕 v3.9.3: si ya es el chat activo (el agente lo tiene
+            // abierto), no hace falta clickearlo de nuevo — ya está
+            // mostrando la conversación correcta, se ahorra el click y el
+            // delay de cambio.
             const yaEsElActivo = chatActivoActual && chatActivoActual.id === chat.id;
             if (!yaEsElActivo) {
                 botCambiandoChat = true;
@@ -1918,6 +1959,26 @@
                 elChat.click();
                 await sleep(CONFIG.delayCambioDeChat);
             }
+
+            if (!textareaDisponible()) {
+                log(`⏸️ ${chat.nombre}: textarea no disponible ahora, reintento en el próximo ciclo`, 'warn');
+                ultimaRespuestaChat.set(chat.id, Date.now() - CONFIG.cooldownChat - 1000);
+                if (!yaEsElActivo) await volverAChat(chatPrevio, chat);
+                return;
+            }
+
+            // Generar respuesta (saludos espejeados tienen prioridad)
+            const frase = await generarRespuesta(mensaje, etapa, chat.id, chat.nombre, historial);
+            if (!frase) {
+                marcarCritico(chat.id, chat.nombre, 'sin frase libre de repetición');
+                ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
+                if (!yaEsElActivo) await volverAChat(chatPrevio, chat);
+                return;
+            }
+
+            // 🆕 v3.4.2: Marcar cooldown ANTES de enviar (no después)
+            // Esto evita que otro ciclo procese el mismo chat mientras estamos enviando
+            ultimaRespuestaChat.set(chat.id, Date.now());
 
             const ok = await enviarMensaje(frase);
             if (ok) {
@@ -1993,7 +2054,12 @@
         cicloEnCurso = true;
         try {
             const chats = leerChats();
-            if (chats.length === 0) return;
+            if (chats.length === 0) {
+                // 🆕 v3.9.5: igual se refresca el panel — así la alerta de
+                // "sin token capturado" se ve incluso sin chats en la lista.
+                actualizarPanelEstado(chats, null);
+                return;
+            }
 
             let activoEscribiendo = false;
             if (CONFIG.pausarSiAgenteEscribe) {
@@ -2044,7 +2110,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.9.4</span>
+                    <span id="dt-title">🤖 DuTurbo v3.9.5</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2528,11 +2594,33 @@
         if (status) status.classList.toggle('on', activo);
     }
 
+    // 🆕 v3.9.5: si el bot está activo pero todavía no se capturó el
+    // Authorization Bearer (interceptando el fetch/XHR de la propia app —
+    // ver "API DIRECTA"), NO puede leer ni responder NINGÚN chat. Es peor
+    // que un chat individual fallando: es todo el sistema parado en
+    // silencio. Se avisa con el mismo mecanismo que un crítico (log +
+    // sonido, throttleado para no spamear) para que sea imposible no
+    // notarlo — normalmente se soluciona solo mandando o recibiendo
+    // cualquier mensaje manual en HeroCare.
+    let ultimoAvisoSinAuth = 0;
+    function avisarSiSinAuth() {
+        if (!activo || authCapturado) return false;
+        if (Date.now() - ultimoAvisoSinAuth > 20000) {
+            log('🚨 SIN TOKEN DE SESIÓN CAPTURADO — el bot no puede leer ni responder ningún chat. Escribí o abrí cualquier chat en HeroCare para que se capture.', 'error');
+            playAlertSound();
+            ultimoAvisoSinAuth = Date.now();
+        }
+        return true;
+    }
+
     function actualizarPanelEstado(chats, chatActivo) {
+        const sinAuth = avisarSiSinAuth();
         const div = document.getElementById('dt-estado');
         if (!div) return;
         if (!chats || chats.length === 0) {
-            div.textContent = 'Sin chats abiertos';
+            div.textContent = sinAuth ? 'Sin chats — falta capturar el token de sesión' : 'Sin chats abiertos';
+            const statusVacio = document.querySelector('.dt-fb-status');
+            if (statusVacio) statusVacio.classList.toggle('critico', sinAuth);
             return;
         }
         let html = '';
@@ -2541,7 +2629,7 @@
         if (!chatActivo && activo) {
             html += `<div style="color:#fcd34d; padding:4px; margin-bottom:4px; background:rgba(252,211,77,.1); border-radius:3px; font-size:10px;">⚠️ Click en un chat para identificarlo</div>`;
         }
-        let hayCritico = false; // 🆕 v3.9.0: para marcar el botón flotante
+        let hayCritico = sinAuth; // 🆕 v3.9.0/v3.9.5: para marcar el botón flotante
 
         chats.forEach(c => {
             const esActivo = chatActivo && c.id === chatActivo.id;
@@ -2607,7 +2695,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.9.4 cargado (agrega duTurbo.verHistorial para diagnóstico)', 'success');
+        log('🚀 DuTurbo v3.9.5 cargado (timeout de red + fixes de resiliencia para el TMR)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
