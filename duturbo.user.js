@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.11.0
-// @description  v3.11.0: duTurbo.escanearChats() — segunda mejora acordada. Escanea TODOS los chats abiertos y clasifica cada mensaje de cliente contra lo que el bot ya reconoce (TEMAS_CLIENTE, confirmacion corta, cierre, NO TOCAR). Imprime una tabla con la clasificacion de cada mensaje y otra solo con los que NO matchean NINGUNA categoria (candidatos reales a un TEMA_CLIENTE nuevo) — para ampliar el banco de frases con datos reales en vez de imaginar casos. v3.10.1: TMR mostrado como % de incumplimiento (formato real de la plataforma, objetivo 3.5%). v3.10.0: medicion de TMR real por mensaje. v3.9.5: timeout de red, verificacion de textarea antes de gastar una frase de la regla de oro, reintento del boton Enviar, alerta si no se capturo el token de sesion. v3.9.0-3.9.4: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, duTurbo.verHistorial().
+// @version      3.12.0
+// @description  v3.12.0: "Flight recorder" — tercera mejora acordada. Cada respuesta real y cada escalacion se manda en segundo plano (fire-and-forget, nunca bloquea ni retrasa el envio real) a backend/api/registrar-log.js, que solo hace un INSERT en la tabla duturbo_logs de Supabase — sin llamar a ninguna IA (a diferencia del viejo generar-respuesta.js, que ya no se usa). Guarda mensaje, respuesta enviada (o null si escalo), latencia real medida, y la razon si escalo. Objetivo: tener historial real con el tiempo para ver tendencias, sin agregar riesgo ni latencia al flujo del bot. Requiere una columna nueva en Supabase: ALTER TABLE public.duturbo_logs ADD COLUMN razon text; Se puede desactivar con CONFIG.logRemotoActivo=false. v3.11.0: duTurbo.escanearChats() para encontrar huecos reales del banco de frases. v3.10.x: medicion de TMR real (% de incumplimiento, formato de la plataforma). v3.9.x: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, timeout de red, alerta de critico, duTurbo.verHistorial().
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -40,6 +40,14 @@
         // realmente olvidado — la razón real para escalar es quedarse sin
         // frase libre de repetición (regla de oro), no esto.
         umbralCritico: 20,
+
+        // 🆕 v3.12.0: "flight recorder" — cada respuesta real o escalación
+        // se manda en segundo plano (fire-and-forget, nunca bloquea ni
+        // retrasa el envío real) a este endpoint, que solo hace un INSERT
+        // en Supabase — no llama a ninguna IA. Poner en false para
+        // desactivarlo sin tocar el resto del código.
+        logRemotoActivo: true,
+        logRemotoURL: 'https://du-turbo-backend.vercel.app/api/registrar-log',
     };
 
     // ════════════════════════════════════════════════════════════
@@ -1289,12 +1297,29 @@
     function registrarLatenciaRespuesta(chatId, nombre) {
         const detectadoEn = momentoDetectadoPorChat.get(chatId);
         momentoDetectadoPorChat.delete(chatId);
-        if (!detectadoEn) return; // no había timestamp (no debería pasar, pero por las dudas)
+        if (!detectadoEn) return null; // no había timestamp (no debería pasar, pero por las dudas)
         const ms = Date.now() - detectadoEn;
         latenciasRecientes.push({ nombre, ms, ts: Date.now() });
         if (latenciasRecientes.length > MAX_LATENCIAS_GUARDADAS) latenciasRecientes.shift();
         const seg = (ms / 1000).toFixed(1);
         log(`⏱️ Respondido a ${nombre} en ${seg}s${ms > UMBRAL_TMR_MS ? ' (⚠️ arriba del objetivo de 12s)' : ''}`, ms > UMBRAL_TMR_MS ? 'warn' : 'success');
+        return ms;
+    }
+
+    // 🆕 v3.12.0: "flight recorder" — manda cada respuesta real o
+    // escalación al backend en segundo plano, SIN esperar el resultado
+    // (fire-and-forget) y SIN romper nada si falla (red caída, backend
+    // dormido, etc.) — es solo estadística para ver tendencias con el
+    // tiempo, nunca debe afectar el flujo real de respuesta del bot.
+    function registrarLogRemoto(mensaje, respuesta, latenciaMs, escalo, razon) {
+        if (!CONFIG.logRemotoActivo || !mensaje) return;
+        try {
+            fetch(CONFIG.logRemotoURL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mensaje, respuesta, latenciaMs, escalo, razon })
+            }).catch(() => { /* no-op — un log perdido no es un problema */ });
+        } catch (e) { /* no-op */ }
     }
 
     function statsTMR() {
@@ -1797,10 +1822,14 @@
     // suena de inmediato y deja el botón flotante marcado (ver
     // actualizarPanelEstado), así se nota incluso con el panel minimizado.
     // sticky=true (NO TOCAR) no expira solo — ver estaCritico() arriba.
-    function marcarCritico(chatId, nombre, razon, sticky = false) {
+    // 🆕 v3.12.0: mensaje es opcional — cuando se pasa, se manda al flight
+    // recorder como escalación (para ver con el tiempo qué tan seguido y
+    // por qué motivo se está escalando, no solo respuestas exitosas).
+    function marcarCritico(chatId, nombre, razon, sticky = false, mensaje = null) {
         chatsCriticos.set(chatId, { ts: Date.now(), sticky });
         log(`🚨 CRÍTICO (${razon}): ${nombre} — necesita tu atención${sticky ? ' (no se reintenta solo)' : ''}`, 'error');
         playAlertSound();
+        if (mensaje) registrarLogRemoto(mensaje, null, null, true, razon);
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1972,7 +2001,7 @@
             // CHECK 3: Filtro NO TOCAR
             const razonNoTocar = esClienteNoTocar(mensaje);
             if (razonNoTocar) {
-                marcarCritico(chat.id, chat.nombre, razonNoTocar, true);
+                marcarCritico(chat.id, chat.nombre, razonNoTocar, true, mensaje);
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 momentoDetectadoPorChat.delete(chat.id);
                 return;
@@ -1984,7 +2013,7 @@
 
             // CHECK 4: ¿Etapa crítica?
             if (etapa === 4) {
-                marcarCritico(chat.id, chat.nombre, 'etapa crítica');
+                marcarCritico(chat.id, chat.nombre, 'etapa crítica', false, mensaje);
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 momentoDetectadoPorChat.delete(chat.id);
                 return;
@@ -2026,7 +2055,7 @@
             // Generar respuesta (saludos espejeados tienen prioridad)
             const frase = await generarRespuesta(mensaje, etapa, chat.id, chat.nombre, historial);
             if (!frase) {
-                marcarCritico(chat.id, chat.nombre, 'sin frase libre de repetición');
+                marcarCritico(chat.id, chat.nombre, 'sin frase libre de repetición', false, mensaje);
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 momentoDetectadoPorChat.delete(chat.id);
                 if (!yaEsElActivo) await volverAChat(chatPrevio, chat);
@@ -2042,7 +2071,8 @@
                 ultimaRespuestaChat.set(chat.id, Date.now());
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 incrementarRespuestas(chat.id);
-                registrarLatenciaRespuesta(chat.id, chat.nombre); // 🆕 v3.10.0: cierra el cronómetro de TMR
+                const msRespuesta = registrarLatenciaRespuesta(chat.id, chat.nombre); // 🆕 v3.10.0: cierra el cronómetro de TMR
+                registrarLogRemoto(mensaje, frase, msRespuesta, false, null); // 🆕 v3.12.0: flight recorder
                 log(`✅ Enviado a ${chat.nombre}: "${frase.slice(0, 50)}${frase.length > 50 ? '...' : ''}"`, 'success');
             } else {
                 log(`❌ ${chat.nombre}: falló el envío`, 'error');
@@ -2175,7 +2205,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.11.0</span>
+                    <span id="dt-title">🤖 DuTurbo v3.12.0</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2797,7 +2827,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.11.0 cargado (agrega duTurbo.escanearChats para encontrar huecos)', 'success');
+        log('🚀 DuTurbo v3.12.0 cargado (flight recorder en Supabase, sin IA)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
