@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.10.0
-// @description  v3.10.0: Medicion de TMR real. Se mide, por cada mensaje, el tiempo desde que el bot lo detecta (badge de no-leido, o sort_id nuevo en el chat activo) hasta que efectivamente lo manda — esa es la metrica que importa, no cuanto tarda en generar el texto. El panel muestra el promedio de las ultimas 50 respuestas y el % que quedo bajo el objetivo de 12s (se pone en rojo si baja de 80%). Tambien disponible por consola: duTurbo.tmr() / duTurbo.tmrDetalle(). No cuenta para el promedio cuando el bot decide no responder a proposito (despedida, solucion ya dada, NO TOCAR, etapa critica) — ahi no hay "tiempo de respuesta" que medir. v3.9.5: timeout de red (fetchConTimeout) para que un fetch colgado no congele el bot entero; se abre el chat y se verifica el textarea ANTES de generar/gastar una frase de la regla de oro; reintento del boton Enviar; alerta si no se capturo el token de sesion. v3.9.0-3.9.4: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, herramienta de diagnostico duTurbo.verHistorial().
+// @version      3.10.1
+// @description  v3.10.1: FIX — el TMR que muestra la plataforma real es un % de INCUMPLIMIENTO (mas bajo = mejor, objetivo 3.5%, un TMR de 23% es malo). v3.10.0 calculaba y mostraba el % que SI llego a tiempo (la metrica invertida), asi que el numero del panel no era comparable de un vistazo contra el dashboard real. Ahora dt-tmr-stats muestra "TMR: X.X% (objetivo 3.5%)" en el mismo formato que ya usás, y se pone en rojo cuando supera el objetivo. v3.10.0: medicion de TMR real — tiempo desde que el bot detecta un mensaje nuevo hasta que lo manda, sin contar los casos en que decide no responder a proposito (despedida, solucion dada, NO TOCAR, etapa critica). Disponible por consola: duTurbo.tmr() / duTurbo.tmrDetalle(). v3.9.5: timeout de red para que un fetch colgado no congele el bot entero; se verifica el textarea ANTES de gastar una frase de la regla de oro; reintento del boton Enviar; alerta si no se capturo el token de sesion. v3.9.0-3.9.4: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, duTurbo.verHistorial().
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -1273,6 +1273,12 @@
     const latenciasRecientes = []; // { nombre, ms, ts } — últimas N respuestas reales, para el promedio del panel
     const MAX_LATENCIAS_GUARDADAS = 50;
     const UMBRAL_TMR_MS = 12000; // objetivo: responder antes de los 12s
+    // 🐛 fix (v3.10.1): el TMR real de la plataforma es un % de
+    // INCUMPLIMIENTO (cuanto más bajo, mejor — objetivo 3.5%, un TMR de
+    // 23% es malo). statsTMR() calculaba el % que SÍ llegó a tiempo, que
+    // es la métrica invertida — mostrar "92% a tiempo" en vez de "8% TMR"
+    // no es comparable de un vistazo contra el número real del dashboard.
+    const OBJETIVO_TMR_PCT = 3.5;
 
     function marcarMensajeDetectado(chatId) {
         if (!momentoDetectadoPorChat.has(chatId)) {
@@ -1295,9 +1301,13 @@
         if (latenciasRecientes.length === 0) return null;
         const suma = latenciasRecientes.reduce((acc, l) => acc + l.ms, 0);
         const promedioMs = suma / latenciasRecientes.length;
-        const dentroDeObjetivo = latenciasRecientes.filter(l => l.ms <= UMBRAL_TMR_MS).length;
-        const porcentaje = Math.round((dentroDeObjetivo / latenciasRecientes.length) * 100);
-        return { promedioMs, porcentaje, cantidad: latenciasRecientes.length };
+        const fueraDeObjetivo = latenciasRecientes.filter(l => l.ms > UMBRAL_TMR_MS).length;
+        // 🐛 fix (v3.10.1): tmrPct es el % de incumplimiento (formato real
+        // de la plataforma: más bajo = mejor). porcentajeATiempo se
+        // conserva por compatibilidad (era el nombre viejo, invertido).
+        const tmrPct = (fueraDeObjetivo / latenciasRecientes.length) * 100;
+        const porcentajeATiempo = 100 - tmrPct;
+        return { promedioMs, tmrPct, porcentajeATiempo, cantidad: latenciasRecientes.length };
     }
 
     // 🆕 v3.2.1: Frase fija para agradecer primera imagen
@@ -2165,7 +2175,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.10.0</span>
+                    <span id="dt-title">🤖 DuTurbo v3.10.1</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2699,8 +2709,9 @@
             return;
         }
         const promedioSeg = (stats.promedioMs / 1000).toFixed(1);
-        div.textContent = `⏱️ TMR: ${promedioSeg}s prom. · ${stats.porcentaje}% bajo 12s (últimas ${stats.cantidad})`;
-        div.classList.toggle('dt-tmr-mal', stats.porcentaje < 80);
+        const tmrTexto = stats.tmrPct.toFixed(1);
+        div.textContent = `⏱️ TMR: ${tmrTexto}% (objetivo ${OBJETIVO_TMR_PCT}%) · ${promedioSeg}s prom. (últimas ${stats.cantidad})`;
+        div.classList.toggle('dt-tmr-mal', stats.tmrPct > OBJETIVO_TMR_PCT);
     }
 
     function actualizarPanelEstado(chats, chatActivo) {
@@ -2786,7 +2797,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.10.0 cargado (medición de TMR real en el panel)', 'success');
+        log('🚀 DuTurbo v3.10.1 cargado (TMR ahora en % de incumplimiento, como en la plataforma)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
