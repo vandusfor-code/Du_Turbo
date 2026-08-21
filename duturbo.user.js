@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DuTurbo Vigilante Multi-Chat
 // @namespace    duacademy.site
-// @version      3.9.5
-// @description  v3.9.5: Auditoria enfocada en "que no quede un mensaje sin responder" (TMR). 1) FIX GRAVE — ninguna llamada a la API de HeroCare tenia timeout; un solo fetch colgado (red inestable) congelaba el bot ENTERO para siempre (cicloEnCurso nunca se liberaba), no solo un chat. Ahora las dos llamadas usan fetchConTimeout (8s). 2) Si el envio fallaba (textarea con un borrador viejo del agente, boton Enviar tardando en habilitarse), la frase ya se habia gastado de la regla de oro ANTES de saber si se iba a poder mandar — con fallas repetidas un chat podia terminar marcado "sin frase libre" sin haber recibido ni una sola respuesta real. Ahora se abre el chat y se verifica que el textarea este disponible ANTES de generar/gastar la frase. 3) enviarMensaje reintenta buscar el boton Enviar hasta 3 veces (900ms extra) antes de rendirse, por si HeroCare tarda en habilitarlo. 4) Si el bot esta activo pero todavia no se capturo el token de sesion, NO puede responder NINGUN chat — antes esto casi no se notaba; ahora suena y marca el boton flotante en rojo igual que un chat critico, incluso sin chats en la lista. v3.9.4: duTurbo.verHistorial() para diagnostico con datos reales. v3.9.3: el chat activo volvio a incluirse en la respuesta automatica. v3.9.0-3.9.2: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, auditoria exhaustiva.
+// @version      3.10.0
+// @description  v3.10.0: Medicion de TMR real. Se mide, por cada mensaje, el tiempo desde que el bot lo detecta (badge de no-leido, o sort_id nuevo en el chat activo) hasta que efectivamente lo manda — esa es la metrica que importa, no cuanto tarda en generar el texto. El panel muestra el promedio de las ultimas 50 respuestas y el % que quedo bajo el objetivo de 12s (se pone en rojo si baja de 80%). Tambien disponible por consola: duTurbo.tmr() / duTurbo.tmrDetalle(). No cuenta para el promedio cuando el bot decide no responder a proposito (despedida, solucion ya dada, NO TOCAR, etapa critica) — ahi no hay "tiempo de respuesta" que medir. v3.9.5: timeout de red (fetchConTimeout) para que un fetch colgado no congele el bot entero; se abre el chat y se verifica el textarea ANTES de generar/gastar una frase de la regla de oro; reintento del boton Enviar; alerta si no se capturo el token de sesion. v3.9.0-3.9.4: eliminacion de Modo Inteligente/Modo Gestion, envio 100% visible por UI real, lectura por API directa, alerta de critico, herramienta de diagnostico duTurbo.verHistorial().
 // @author       Duvan Ramos
 // @match        *://pedidosya-us.deliveryherocare.com/*
 // @grant        none
@@ -1263,6 +1263,43 @@
     let sonidoActivo = localStorage.getItem('duturbo_sonido') !== '0';
     let ultimoSonido = 0;
 
+    // 🆕 v3.10.0: MEDICIÓN DE TMR REAL — desde el momento en que el bot
+    // detecta un mensaje nuevo del cliente (badge, o sort_id nuevo en el
+    // chat activo) hasta que efectivamente lo envía. Es la métrica que
+    // importa de verdad: cuánto tarda el bot en responder, no cuánto tarda
+    // en generar el texto — así se puede probar el impacto real y detectar
+    // si algo se degrada, en vez de ir a ojo.
+    const momentoDetectadoPorChat = new Map(); // chatId -> Date.now() de la primera vez que se vio el mensaje pendiente
+    const latenciasRecientes = []; // { nombre, ms, ts } — últimas N respuestas reales, para el promedio del panel
+    const MAX_LATENCIAS_GUARDADAS = 50;
+    const UMBRAL_TMR_MS = 12000; // objetivo: responder antes de los 12s
+
+    function marcarMensajeDetectado(chatId) {
+        if (!momentoDetectadoPorChat.has(chatId)) {
+            momentoDetectadoPorChat.set(chatId, Date.now());
+        }
+    }
+
+    function registrarLatenciaRespuesta(chatId, nombre) {
+        const detectadoEn = momentoDetectadoPorChat.get(chatId);
+        momentoDetectadoPorChat.delete(chatId);
+        if (!detectadoEn) return; // no había timestamp (no debería pasar, pero por las dudas)
+        const ms = Date.now() - detectadoEn;
+        latenciasRecientes.push({ nombre, ms, ts: Date.now() });
+        if (latenciasRecientes.length > MAX_LATENCIAS_GUARDADAS) latenciasRecientes.shift();
+        const seg = (ms / 1000).toFixed(1);
+        log(`⏱️ Respondido a ${nombre} en ${seg}s${ms > UMBRAL_TMR_MS ? ' (⚠️ arriba del objetivo de 12s)' : ''}`, ms > UMBRAL_TMR_MS ? 'warn' : 'success');
+    }
+
+    function statsTMR() {
+        if (latenciasRecientes.length === 0) return null;
+        const suma = latenciasRecientes.reduce((acc, l) => acc + l.ms, 0);
+        const promedioMs = suma / latenciasRecientes.length;
+        const dentroDeObjetivo = latenciasRecientes.filter(l => l.ms <= UMBRAL_TMR_MS).length;
+        const porcentaje = Math.round((dentroDeObjetivo / latenciasRecientes.length) * 100);
+        return { promedioMs, porcentaje, cantidad: latenciasRecientes.length };
+    }
+
     // 🆕 v3.2.1: Frase fija para agradecer primera imagen
     const FRASE_PRIMERA_IMAGEN = "Agradezco que me hayas enviado la imagen. Estoy revisándola para dar una respuesta adecuada a tu caso.";
 
@@ -1890,11 +1927,17 @@
 
             log(`🔄 ${chat.nombre}: mensaje nuevo del cliente`, 'info');
 
+            // 🆕 v3.10.0: arranca el cronómetro de TMR si todavía no estaba
+            // (para el chat activo, que no tiene badge, este es el primer
+            // punto donde se confirma que hay un mensaje nuevo de verdad).
+            marcarMensajeDetectado(chat.id);
+
             // CHECK 1: ¿Ya se despidió?
             if (agenteYaSeDespidio(historial)) {
                 marcarDespedido(chat.id);
                 log(`🚫 ${chat.nombre}: ya despedido`, 'warn');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
+                momentoDetectadoPorChat.delete(chat.id); // no se va a responder — no cuenta para el TMR
                 return;
             }
 
@@ -1903,6 +1946,7 @@
                 marcarConSolucion(chat.id);
                 log(`💰 ${chat.nombre}: ya hay solución — no respondo`, 'warn');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
+                momentoDetectadoPorChat.delete(chat.id);
                 return;
             }
 
@@ -1920,6 +1964,7 @@
             if (razonNoTocar) {
                 marcarCritico(chat.id, chat.nombre, razonNoTocar, true);
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
+                momentoDetectadoPorChat.delete(chat.id);
                 return;
             }
 
@@ -1931,6 +1976,7 @@
             if (etapa === 4) {
                 marcarCritico(chat.id, chat.nombre, 'etapa crítica');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
+                momentoDetectadoPorChat.delete(chat.id);
                 return;
             }
 
@@ -1972,6 +2018,7 @@
             if (!frase) {
                 marcarCritico(chat.id, chat.nombre, 'sin frase libre de repetición');
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
+                momentoDetectadoPorChat.delete(chat.id);
                 if (!yaEsElActivo) await volverAChat(chatPrevio, chat);
                 return;
             }
@@ -1985,6 +2032,7 @@
                 ultimaRespuestaChat.set(chat.id, Date.now());
                 ultimoSortIdProcesado.set(chat.id, ultimo.sortId);
                 incrementarRespuestas(chat.id);
+                registrarLatenciaRespuesta(chat.id, chat.nombre); // 🆕 v3.10.0: cierra el cronómetro de TMR
                 log(`✅ Enviado a ${chat.nombre}: "${frase.slice(0, 50)}${frase.length > 50 ? '...' : ''}"`, 'success');
             } else {
                 log(`❌ ${chat.nombre}: falló el envío`, 'error');
@@ -2061,6 +2109,13 @@
                 return;
             }
 
+            // 🆕 v3.10.0: arrancar el cronómetro de TMR apenas se ve el
+            // badge de no-leído — es el momento más temprano y confiable
+            // que tenemos de "hay un mensaje esperando respuesta". Para el
+            // chat activo (sin badge) el cronómetro arranca dentro de
+            // procesarChat, al confirmar el sort_id nuevo vía la API.
+            chats.forEach(c => { if (c.tieneNuevos) marcarMensajeDetectado(c.id); });
+
             let activoEscribiendo = false;
             if (CONFIG.pausarSiAgenteEscribe) {
                 const taActivo = document.querySelector(SEL.textarea);
@@ -2110,7 +2165,7 @@
             <!-- Panel completo (visible cuando está expandido) -->
             <div id="duturbo-panel">
                 <div id="dt-header">
-                    <span id="dt-title">🤖 DuTurbo v3.9.5</span>
+                    <span id="dt-title">🤖 DuTurbo v3.10.0</span>
                     <button id="dt-min" title="Minimizar a botón">✕</button>
                 </div>
                 <div id="dt-body">
@@ -2120,6 +2175,7 @@
                             <input id="dt-agente" type="text" placeholder="Ej: Duvan Ramos" value="${CONFIG.nombreAgente || ''}">
                         </label>
                     </div>
+                    <div id="dt-tmr-stats">Sin datos de TMR todavía</div>
                     <div id="dt-estado">Esperando...</div>
                     <button id="dt-sonido" style="width:100%;padding:5px;border:1px solid rgba(255,255,255,0.1);border-radius:5px;background:rgba(255,255,255,0.05);color:#94a3b8;font-size:11px;cursor:pointer;">🔊 Sonido ON</button>
                     <div id="dt-templates" style="display:flex;gap:4px;flex-wrap:wrap;">
@@ -2286,6 +2342,23 @@
                 transition: border-color 0.2s;
             }
             #dt-config input:focus, #dt-config select:focus { border-color: #C0DF16; }
+
+            /* 🆕 v3.10.0: TMR real medido */
+            #dt-tmr-stats {
+                font-size: 11px;
+                font-weight: 600;
+                padding: 6px 9px;
+                background: rgba(192,223,22,0.08);
+                border: 1px solid rgba(192,223,22,0.2);
+                border-radius: 6px;
+                color: #d9f99d;
+                text-align: center;
+            }
+            #dt-tmr-stats.dt-tmr-mal {
+                background: rgba(239,68,68,0.12);
+                border-color: rgba(239,68,68,0.35);
+                color: #fca5a5;
+            }
 
             /* Estado (lista de chats) */
             #dt-estado {
@@ -2613,7 +2686,25 @@
         return true;
     }
 
+    // 🆕 v3.10.0: pinta el promedio de TMR real (últimas N respuestas) y el
+    // % que quedó dentro del objetivo de 12s. Se recalcula cada vez que se
+    // refresca el panel — no hace falta guardar nada aparte para esto.
+    function actualizarPanelTMR() {
+        const div = document.getElementById('dt-tmr-stats');
+        if (!div) return;
+        const stats = statsTMR();
+        if (!stats) {
+            div.textContent = 'Sin datos de TMR todavía';
+            div.classList.remove('dt-tmr-mal');
+            return;
+        }
+        const promedioSeg = (stats.promedioMs / 1000).toFixed(1);
+        div.textContent = `⏱️ TMR: ${promedioSeg}s prom. · ${stats.porcentaje}% bajo 12s (últimas ${stats.cantidad})`;
+        div.classList.toggle('dt-tmr-mal', stats.porcentaje < 80);
+    }
+
     function actualizarPanelEstado(chats, chatActivo) {
+        actualizarPanelTMR();
         const sinAuth = avisarSiSinAuth();
         const div = document.getElementById('dt-estado');
         if (!div) return;
@@ -2695,7 +2786,7 @@
         crearPanel();
         actualizarPanelToggle();
         inicializarTrackingClicks();
-        log('🚀 DuTurbo v3.9.5 cargado (timeout de red + fixes de resiliencia para el TMR)', 'success');
+        log('🚀 DuTurbo v3.10.0 cargado (medición de TMR real en el panel)', 'success');
         log('💡 Pon tu nombre y click en un chat antes de activar', 'info');
         setInterval(ciclo, CONFIG.intervalo);
     }
@@ -2714,6 +2805,9 @@
         reset: (id) => resetChatLigero(id),
         testSaludo: (msg, nombre) => detectarSaludo(msg, nombre),
         testImagen: (msg) => mensajeTieneImagen(msg),
+        // 🆕 v3.10.0: TMR real medido — { promedioMs, porcentaje, cantidad } o null
+        tmr: () => statsTMR(),
+        tmrDetalle: () => latenciasRecientes.slice(),
         estado: () => ({
             activo,
             chatActivo: chatActivoActual,
